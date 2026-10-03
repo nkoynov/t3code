@@ -1007,10 +1007,14 @@ function WebhookScheduleDetails({
             accessibilityRole="button"
             accessibilityLabel="Copy webhook URL"
             accessibilityHint="Copies the URL to the clipboard"
+            // A bare path is not something a sender can call, so only full URLs copy.
+            disabled={!address.startsWith("http")}
             onPress={() => void tryCopyTextWithHaptic(address)}
             className="gap-1 active:opacity-70"
           >
-            <Text className="text-lg text-foreground">Webhook URL</Text>
+            <Text className="text-lg text-foreground">
+              {address.startsWith("http") ? "Webhook URL" : "Webhook path"}
+            </Text>
             <Text className="text-sm text-foreground-muted" numberOfLines={2} selectable>
               {address}
             </Text>
