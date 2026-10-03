@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -402,6 +403,9 @@ it.effect("caps deliveries waiting behind a stuck run", () =>
           );
           assert.equal(waiting.filter((result) => result._tag === "accepted").length, 19);
           assert.equal(waiting.at(-1)?._tag, "rate_limited");
+          // The refused request is not logged.
+          const logged = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+          assert.equal(logged.length, 20);
           yield* Deferred.succeed(gate, undefined);
         }),
       { gate },

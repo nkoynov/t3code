@@ -1062,6 +1062,12 @@ export const layer = Layer.effect(
               next.delete(input.id);
               return next;
             }),
+            // Old deliveries still finishing must not fill a recreated task's queue.
+            Ref.update(webhookQueued, (queued) => {
+              const next = new Map(queued);
+              next.delete(input.id);
+              return next;
+            }),
           ]),
         ),
         Effect.andThen(notifyChanged),
@@ -1093,15 +1099,21 @@ export const layer = Layer.effect(
         }
         const token = yield* newWebhookToken;
         const now = yield* localNow;
-        yield* sql`
+        // Matching created_at keeps a rotation from landing on a task deleted
+        // and recreated under the same id since it was loaded.
+        const updated = yield* sql<{ task_id: string }>`
           UPDATE scheduled_tasks
           SET webhook_token = ${token}, updated_at = ${iso(now)}
-          WHERE task_id = ${input.id}
+          WHERE task_id = ${input.id} AND created_at = ${task.createdAt}
+          RETURNING task_id
         `.pipe(
           Effect.mapError((cause) =>
             taskError("Could not rotate webhook token.", { taskId: input.id, cause }),
           ),
         );
+        if (updated.length === 0) {
+          return yield* taskError("Schedule task was deleted or replaced.", { taskId: input.id });
+        }
         yield* notifyChanged;
         return { task: yield* loadTask(input.id) };
       });
@@ -1342,23 +1354,16 @@ export const layer = Layer.effect(
         }
 
         const rendered = renderWebhookPrompt(task.prompt, request);
-        yield* log("accepted", {
-          signatureVerified: signature !== null,
-          missing: rendered.missing,
-          renderedPrompt: rendered.prompt,
-        });
-        // Bound the deliveries waiting behind a slow run, so steady traffic to
-        // a stuck task cannot pile up parked fibers.
+        // Bound the deliveries one task holds, so steady traffic to a stuck
+        // task cannot pile up parked fibers. A refused request is not logged,
+        // so it cannot push real deliveries out of the log.
         const queued = yield* Ref.modify(webhookQueued, (counts) => {
           const count = counts.get(task.id) ?? 0;
           return count >= WEBHOOK_MAX_QUEUED_PER_TASK
             ? ([false, counts] as const)
             : ([true, new Map(counts).set(task.id, count + 1)] as const);
         });
-        if (!queued) {
-          yield* markDeliveryFailed(deliveryId, "Too many deliveries are waiting for this task.");
-          return { _tag: "rate_limited" as const };
-        }
+        if (!queued) return { _tag: "rate_limited" as const };
         const release = Ref.update(webhookQueued, (counts) => {
           const next = new Map(counts);
           const count = (next.get(task.id) ?? 1) - 1;
@@ -1366,6 +1371,11 @@ export const layer = Layer.effect(
           else next.set(task.id, count);
           return next;
         });
+        yield* log("accepted", {
+          signatureVerified: signature !== null,
+          missing: rendered.missing,
+          renderedPrompt: rendered.prompt,
+        }).pipe(Effect.onError(() => release));
         const permit = yield* webhookPermit(task.id);
         yield* runTask(task, "webhook", { deliveryId, prompt: rendered.prompt }).pipe(
           Effect.flatMap((completed) =>
