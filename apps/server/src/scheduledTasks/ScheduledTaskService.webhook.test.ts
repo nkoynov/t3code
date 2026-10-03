@@ -354,6 +354,80 @@ it.effect("a delivery queued behind a run does not start once the task is paused
   }),
 );
 
+it.effect("a save without a secret keeps a secret changed after it was read", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const signature = { header: "x-hub-signature-256", encoding: "hex", prefix: "sha256=" };
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: { type: "webhook", signature: { ...signature, secret: "old" } },
+        }),
+      );
+      yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: { type: "webhook", signature: { ...signature, secret: "new" } },
+        }),
+      );
+      // A form opened before the change saves without sending a secret.
+      yield* service.upsert(
+        yield* webhookTaskInput({ title: "Edited", schedule: { type: "webhook", signature } }),
+      );
+      const sign = (secret: string) =>
+        `sha256=${NodeCrypto.createHmac("sha256", secret).update(pullRequestBody).digest("hex")}`;
+      const withSignature = (secret: string) =>
+        requestFor(task, {
+          headers: { "content-type": "application/json", "x-hub-signature-256": sign(secret) },
+        });
+      assert.equal(
+        (yield* service.triggerWebhook(withSignature("old")))._tag,
+        "rejected_signature",
+      );
+      assert.equal((yield* service.triggerWebhook(withSignature("new")))._tag, "accepted");
+    }),
+  ),
+);
+
+it.effect("caps deliveries waiting behind a stuck run", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          yield* service.triggerWebhook(requestFor(task));
+          yield* Queue.take(launches);
+          // The cap counts the running delivery too: 19 more wait, the next is refused.
+          const waiting = yield* Effect.forEach(Array.from({ length: 20 }), () =>
+            service.triggerWebhook(requestFor(task)),
+          );
+          assert.equal(waiting.filter((result) => result._tag === "accepted").length, 19);
+          assert.equal(waiting.at(-1)?._tag, "rate_limited");
+          yield* Deferred.succeed(gate, undefined);
+        }),
+      { gate },
+    );
+  }),
+);
+
+it.effect("logs a body's first 64 KiB by bytes, not characters", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      // 30 000 three-byte characters: under 64 Ki characters, over 64 KiB.
+      const text = "界".repeat(30_000);
+      const body = new TextEncoder().encode(text);
+      yield* service.triggerWebhook(requestFor(task, { body, bodyText: text }));
+      const [summary] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      const { delivery } = yield* service.getWebhookDelivery({
+        id: task.id,
+        deliveryId: summary!.id,
+      });
+      assert.isTrue(delivery.bodyTruncated);
+      assert.isAtMost(new TextEncoder().encode(delivery.body).byteLength, 64 * 1024 + 3);
+    }),
+  ),
+);
+
 it.effect("deleting a task removes its delivery log", () =>
   withService(({ service }) =>
     Effect.gen(function* () {

@@ -49,6 +49,8 @@ export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
 const WEBHOOK_DELIVERY_RETENTION = 50;
 /** Body text kept in the delivery log. Larger bodies are cut and flagged. */
 const WEBHOOK_DELIVERY_LOG_BODY_LIMIT = 64 * 1024;
+/** Deliveries one task may hold at once, running or waiting their turn. */
+const WEBHOOK_MAX_QUEUED_PER_TASK = 20;
 /** Accepted deliveries per task per minute, enforced here as well as on the relay because the tunnel hostname is public too. */
 const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60;
 
@@ -346,6 +348,7 @@ export const layer = Layer.effect(
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
+    const webhookQueued = yield* Ref.make<ReadonlyMap<ScheduledTaskId, number>>(new Map());
     const webhookRateWindows = yield* Ref.make<ReadonlyMap<ScheduledTaskId, RateWindow>>(new Map());
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
@@ -462,7 +465,12 @@ export const layer = Layer.effect(
     const saveTask = (
       task: ScheduledTask,
       requireExisting: boolean,
-      webhook: { readonly token: string | null; readonly secret: string | null },
+      webhook: {
+        readonly token: string | null;
+        readonly secret: string | null;
+        /** False when the save carried no new secret, so a concurrent change survives. */
+        readonly secretChanged: boolean;
+      },
     ) =>
       sql<{ task_id: string }>`
         INSERT INTO scheduled_tasks (
@@ -535,7 +543,10 @@ export const layer = Layer.effect(
             WHEN excluded.webhook_token IS NULL THEN NULL
             ELSE COALESCE(scheduled_tasks.webhook_token, excluded.webhook_token)
           END,
-          webhook_secret = excluded.webhook_secret
+          webhook_secret = CASE
+            WHEN ${webhook.secretChanged ? 1 : 0} = 1 THEN excluded.webhook_secret
+            ELSE scheduled_tasks.webhook_secret
+          END
         RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
@@ -565,16 +576,21 @@ export const layer = Layer.effect(
     // a completing run cannot resurrect a deleted task or clobber concurrent
     // edits to the task definition.
     const markRunning = (id: ScheduledTaskId, startedAtIso: string) =>
-      sql`
+      sql<{ task_id: string }>`
         UPDATE scheduled_tasks
         SET updated_at = ${startedAtIso},
             last_run_at = ${startedAtIso},
             last_run_status = 'running',
             last_run_error = NULL
         WHERE task_id = ${id}
+        RETURNING task_id
       `.pipe(
         Effect.mapError((cause) =>
           taskError("Could not mark schedule task as running.", { taskId: id, cause }),
+        ),
+        // A task deleted after the re-read must not be dispatched from the stale snapshot.
+        Effect.flatMap((rows) =>
+          rows.length > 0 ? Effect.void : taskError("Schedule task not found.", { taskId: id }),
         ),
       );
 
@@ -960,14 +976,16 @@ export const layer = Layer.effect(
                   input.schedule.type === "webhook" ? input.schedule.signature : null;
                 const secret =
                   signature == null ? null : (signature.secret ?? existing?.secret ?? null);
+                const secretChanged =
+                  signature == null || signature.secret !== undefined || existing === null;
                 if (signature != null && secret === null) {
                   return yield* taskError("A webhook signature check needs a signing secret.", {
                     taskId: id,
                   });
                 }
-                return { token, secret };
+                return { token, secret, secretChanged };
               })
-            : { token: null, secret: null };
+            : { token: null, secret: null, secretChanged: true };
         const scheduleUnchanged =
           existingTask !== null &&
           existingTask.enabled === input.enabled &&
@@ -1153,7 +1171,10 @@ export const layer = Layer.effect(
       readonly missing: ReadonlyArray<string>;
       readonly renderedPrompt: string | null;
     }) => {
-      const truncated = input.request.bodyText.length > WEBHOOK_DELIVERY_LOG_BODY_LIMIT;
+      const truncated = input.request.body.byteLength > WEBHOOK_DELIVERY_LOG_BODY_LIMIT;
+      const loggedBody = truncated
+        ? new TextDecoder().decode(input.request.body.subarray(0, WEBHOOK_DELIVERY_LOG_BODY_LIMIT))
+        : input.request.bodyText;
       return sql
         .withTransaction(
           Effect.gen(function* () {
@@ -1168,7 +1189,7 @@ export const layer = Layer.effect(
               SELECT
                 ${input.id}, ${input.taskId}, ${input.receivedAt}, ${input.request.method},
                 ${input.request.query}, ${encodeHeadersJson(redactHeaders(input.request.headers))},
-                ${truncated ? input.request.bodyText.slice(0, WEBHOOK_DELIVERY_LOG_BODY_LIMIT) : input.request.bodyText},
+                ${loggedBody},
                 ${input.request.body.byteLength}, ${truncated ? 1 : 0}, ${input.outcome},
                 ${input.signatureVerified ? 1 : 0}, ${encodeMissingFieldsJson(input.missing)},
                 ${input.renderedPrompt}, NULL
@@ -1326,6 +1347,25 @@ export const layer = Layer.effect(
           missing: rendered.missing,
           renderedPrompt: rendered.prompt,
         });
+        // Bound the deliveries waiting behind a slow run, so steady traffic to
+        // a stuck task cannot pile up parked fibers.
+        const queued = yield* Ref.modify(webhookQueued, (counts) => {
+          const count = counts.get(task.id) ?? 0;
+          return count >= WEBHOOK_MAX_QUEUED_PER_TASK
+            ? ([false, counts] as const)
+            : ([true, new Map(counts).set(task.id, count + 1)] as const);
+        });
+        if (!queued) {
+          yield* markDeliveryFailed(deliveryId, "Too many deliveries are waiting for this task.");
+          return { _tag: "rate_limited" as const };
+        }
+        const release = Ref.update(webhookQueued, (counts) => {
+          const next = new Map(counts);
+          const count = (next.get(task.id) ?? 1) - 1;
+          if (count <= 0) next.delete(task.id);
+          else next.set(task.id, count);
+          return next;
+        });
         const permit = yield* webhookPermit(task.id);
         yield* runTask(task, "webhook", { deliveryId, prompt: rendered.prompt }).pipe(
           Effect.flatMap((completed) =>
@@ -1341,6 +1381,7 @@ export const layer = Layer.effect(
             ),
           ),
           permit.withPermits(1),
+          Effect.ensuring(release),
           Effect.forkIn(serviceScope),
         );
         return { _tag: "accepted" as const, deliveryId };
