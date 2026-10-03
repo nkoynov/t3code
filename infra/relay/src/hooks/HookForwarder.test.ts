@@ -1,4 +1,7 @@
+import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import { RelayApi } from "@t3tools/contracts/relay";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -11,7 +14,10 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
+import * as Etag from "effect/unstable/http/Etag";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpApi from "effect/unstable/httpapi/HttpApi";
+import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
@@ -120,7 +126,10 @@ function makeHarness(options: Harness = {}) {
   );
   const httpEffect = HttpRouter.toHttpEffect(
     Layer.mergeAll(
-      HookForwarder.relayHookRoute.pipe(Layer.provide(forwarderLayer)),
+      HttpApiBuilder.layer(HttpApi.make("RelayApi").add(RelayApi.groups.hooks)).pipe(
+        Layer.provide(HookForwarder.hooksApi.pipe(Layer.provide(forwarderLayer))),
+        Layer.provide([NodeServices.layer, NodeHttpPlatform.layer, Etag.layerWeak]),
+      ),
       relayNotFoundRoute,
       relayCors,
     ),
@@ -334,11 +343,12 @@ describe("HookForwarder", () => {
     }),
   );
 
-  it.effect("rejects OPTIONS with 405 and no CORS preflight", () =>
+  it.effect("answers OPTIONS without a CORS preflight or forwarding", () =>
     Effect.gen(function* () {
       const harness = makeHarness();
       const response = yield* harness.send(new Request(hookUrl(), { method: "OPTIONS" }));
-      expect(response.status).toBe(405);
+      // No hook endpoint accepts OPTIONS, so it falls through to the 404 route.
+      expect(response.status).toBe(404);
       expect(response.headers["access-control-allow-origin"]).toBeUndefined();
       expect(response.headers["access-control-allow-methods"]).toBeUndefined();
       expect(harness.sent).toHaveLength(0);

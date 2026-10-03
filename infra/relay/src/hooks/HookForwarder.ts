@@ -8,9 +8,10 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import { RelayApi } from "@t3tools/contracts/relay";
 
 import * as RelayConfiguration from "../Config.ts";
 import { validateManagedEndpoint, withoutRedirects } from "../environments/EnvironmentConnector.ts";
@@ -18,12 +19,10 @@ import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 
 export const RELAY_HOOK_PATH_PREFIX = "/v1/hooks/";
-export const RELAY_HOOK_ROUTE = "/v1/hooks/:environmentId/:hookId/:token";
 export const RELAY_HOOK_MAX_BODY_BYTES = 1_048_576;
 export const RELAY_HOOK_UPSTREAM_TIMEOUT_MS = 8_000;
 export const RELAY_HOOK_RATE_LIMIT = { limit: 60, periodSeconds: 60 } as const;
 
-const FORWARDED_METHODS = new Set(["GET", "POST", "PUT", "PATCH"]);
 const DROPPED_REQUEST_HEADERS = new Set([
   "host",
   "connection",
@@ -201,10 +200,6 @@ const make = Effect.gen(function* () {
       "relay.environment_id": parsed.environmentId,
       "relay.hook_id": parsed.hookId,
     });
-    if (!FORWARDED_METHODS.has(request.method)) {
-      yield* outcome("method_not_allowed");
-      return errorResponse(405, "method_not_allowed", { allow: "GET, POST, PUT, PATCH" });
-    }
     if (!(yield* rateLimiter.allow(yield* hookBudgetKey(parsed)))) {
       yield* outcome("rate_limited");
       return errorResponse(429, "rate_limited", {
@@ -313,10 +308,22 @@ const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(HookForwarder, make);
 
-/** Registers the public hook forwarding route; static prefix outranks the `/*` fallback. */
-export const relayHookRoute = HttpRouter.use((router) =>
-  Effect.gen(function* () {
+/**
+ * Implements the RelayApi `hooks` group. The endpoints are raw: the forwarder
+ * re-reads the encoded path segments from the request so the token and hook
+ * id reach the environment byte for byte, and streams the body itself.
+ */
+export const hooksApi = HttpApiBuilder.group(
+  RelayApi,
+  "hooks",
+  Effect.fnUntraced(function* (handlers) {
     const forwarder = yield* HookForwarder;
-    yield* router.add("*", RELAY_HOOK_ROUTE, forwarder.handle);
+    const forward = ({ request }: { readonly request: HttpServerRequest.HttpServerRequest }) =>
+      forwarder.handle(request);
+    return handlers
+      .handleRaw("forwardPost", forward)
+      .handleRaw("forwardPut", forward)
+      .handleRaw("forwardPatch", forward)
+      .handleRaw("forwardGet", forward);
   }),
 );

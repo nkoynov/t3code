@@ -290,13 +290,6 @@ export const ApiLive = Api.make(
       Layer.provideMerge(webcryptoLayer),
     );
 
-    const appLayer = relayApiLayer.pipe(
-      Layer.provideMerge(relayClientAuthLayer),
-      Layer.provideMerge(relayDpopClientAuthLayer),
-      Layer.provideMerge(relayEnvironmentAuthLayer),
-      Layer.provide(runtimeLayer),
-    );
-
     // Fails open: a limiter outage must not drop webhooks the environment would accept.
     const hookRateLimiterLayer = Layer.succeed(HookForwarder.HookRateLimiter, {
       allow: (key) =>
@@ -311,9 +304,16 @@ export const ApiLive = Api.make(
         ),
     });
 
-    const hookRouteLayer = HookForwarder.relayHookRoute.pipe(
-      Layer.provide(HookForwarder.layer),
-      Layer.provide(hookRateLimiterLayer),
+    const appLayer = Layer.merge(
+      relayApiLayer,
+      HookForwarder.hooksApi.pipe(
+        Layer.provide(HookForwarder.layer),
+        Layer.provide(hookRateLimiterLayer),
+      ),
+    ).pipe(
+      Layer.provideMerge(relayClientAuthLayer),
+      Layer.provideMerge(relayDpopClientAuthLayer),
+      Layer.provideMerge(relayEnvironmentAuthLayer),
       Layer.provide(runtimeLayer),
     );
 
@@ -407,7 +407,7 @@ export const ApiLive = Api.make(
         HttpApiScalar.layer(RelayApi, { path: "/docs" }),
         relayDocsRedirectRoute,
       ).pipe(Layer.provide([Etag.layerWeak, httpPlatformNotSupportedLayer, relayCors])),
-      Layer.merge(hookRouteLayer, relayNotFoundRoute),
+      relayNotFoundRoute,
     ).pipe(
       HttpRouter.toHttpEffect,
       Effect.provideService(HttpRouter.RouterConfig, RELAY_HTTP_ROUTER_CONFIG),
