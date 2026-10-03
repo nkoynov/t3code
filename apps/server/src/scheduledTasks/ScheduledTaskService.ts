@@ -348,7 +348,9 @@ export const layer = Layer.effect(
     const webhookPermits = yield* Ref.make<ReadonlyMap<ScheduledTaskId, Semaphore.Semaphore>>(
       new Map(),
     );
-    const webhookQueued = yield* Ref.make<ReadonlyMap<ScheduledTaskId, number>>(new Map());
+    // Keyed by task id and creation time, so deliveries of a deleted task that
+    // finish late release their own count, never a recreated task's.
+    const webhookQueued = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
     const webhookRateWindows = yield* Ref.make<ReadonlyMap<ScheduledTaskId, RateWindow>>(new Map());
     const activeRuns = yield* Ref.make<ReadonlySet<ScheduledTaskId>>(new Set());
     // Sliding(1) coalesces the dirty-signal: every notification triggers a
@@ -1062,12 +1064,6 @@ export const layer = Layer.effect(
               next.delete(input.id);
               return next;
             }),
-            // Old deliveries still finishing must not fill a recreated task's queue.
-            Ref.update(webhookQueued, (queued) => {
-              const next = new Map(queued);
-              next.delete(input.id);
-              return next;
-            }),
           ]),
         ),
         Effect.andThen(notifyChanged),
@@ -1357,18 +1353,21 @@ export const layer = Layer.effect(
         // Bound the deliveries one task holds, so steady traffic to a stuck
         // task cannot pile up parked fibers. A refused request is not logged,
         // so it cannot push real deliveries out of the log.
+        const queueKey = `${task.id}\u0000${task.createdAt}`;
         const queued = yield* Ref.modify(webhookQueued, (counts) => {
-          const count = counts.get(task.id) ?? 0;
+          const count = counts.get(queueKey) ?? 0;
           return count >= WEBHOOK_MAX_QUEUED_PER_TASK
             ? ([false, counts] as const)
-            : ([true, new Map(counts).set(task.id, count + 1)] as const);
+            : ([true, new Map(counts).set(queueKey, count + 1)] as const);
         });
         if (!queued) return { _tag: "rate_limited" as const };
+        // Entries leave the map when their count reaches zero, so a deleted
+        // task's key does not linger once its last delivery finishes.
         const release = Ref.update(webhookQueued, (counts) => {
           const next = new Map(counts);
-          const count = (next.get(task.id) ?? 1) - 1;
-          if (count <= 0) next.delete(task.id);
-          else next.set(task.id, count);
+          const count = (next.get(queueKey) ?? 1) - 1;
+          if (count <= 0) next.delete(queueKey);
+          else next.set(queueKey, count);
           return next;
         });
         yield* log("accepted", {
