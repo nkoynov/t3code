@@ -272,6 +272,31 @@ it.effect("a save carrying a stale token cannot undo a rotation", () =>
   ),
 );
 
+it.effect("keeps the newest 50 deliveries when they share a timestamp", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      // Paused, so each request is logged without starting a run. The test
+      // clock is frozen, so every delivery has the same received_at.
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      const ids = yield* Effect.forEach(Array.from({ length: 55 }), (_, index) =>
+        service.triggerWebhook(requestFor(task, { query: `n=${index}` })).pipe(Effect.as(index)),
+      );
+      const { deliveries } = yield* service.listWebhookDeliveries({ id: task.id });
+      assert.equal(deliveries.length, 50);
+      const first = yield* service.getWebhookDelivery({
+        id: task.id,
+        deliveryId: deliveries[0]!.id,
+      });
+      const last = yield* service.getWebhookDelivery({
+        id: task.id,
+        deliveryId: deliveries.at(-1)!.id,
+      });
+      assert.equal(first.delivery.query, `n=${ids.at(-1)}`);
+      assert.equal(last.delivery.query, "n=5");
+    }),
+  ),
+);
+
 it.effect("deleting a task removes its delivery log", () =>
   withService(({ service }) =>
     Effect.gen(function* () {

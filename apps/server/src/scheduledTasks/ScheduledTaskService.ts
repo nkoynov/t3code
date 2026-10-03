@@ -1089,7 +1089,7 @@ export const layer = Layer.effect(
       sql<WebhookDeliveryRow>`
         SELECT * FROM scheduled_task_webhook_deliveries
         WHERE task_id = ${input.id}
-        ORDER BY received_at DESC, delivery_id DESC
+        ORDER BY received_at DESC, rowid DESC
       `.pipe(
         Effect.map((rows) => ({ deliveries: rows.map(decodeDeliverySummary) })),
         Effect.mapError((cause) =>
@@ -1161,7 +1161,8 @@ export const layer = Layer.effect(
               AND delivery_id NOT IN (
                 SELECT delivery_id FROM scheduled_task_webhook_deliveries
                 WHERE task_id = ${input.taskId}
-                ORDER BY received_at DESC, delivery_id DESC
+                -- rowid breaks timestamp ties in arrival order; delivery ids are random.
+                ORDER BY received_at DESC, rowid DESC
                 LIMIT ${WEBHOOK_DELIVERY_RETENTION}
               )
           `;
