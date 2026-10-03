@@ -587,7 +587,7 @@ function WebhookDeliveriesDialog({
                 {selected.body || "(empty)"}
               </DeliveryBlock>
             </div>
-          ) : deliveries === null ? (
+          ) : selectedId !== null ? null : deliveries === null ? (
             <p className="text-sm text-muted-foreground" role="status">
               Loading deliveries…
             </p>
