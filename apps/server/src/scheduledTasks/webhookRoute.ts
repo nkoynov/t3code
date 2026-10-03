@@ -7,7 +7,7 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-import { ScheduledTaskService, WEBHOOK_ROUTE_PREFIX } from "./ScheduledTaskService.ts";
+import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 /** Largest request body a webhook accepts. The relay enforces the same cap. */
 export const WEBHOOK_MAX_BODY_BYTES = 1024 * 1024;
@@ -21,14 +21,14 @@ const json = (status: number, body: Record<string, string>) =>
  * is the credential, and the service checks both. It is reachable directly,
  * over the managed tunnel, or through the relay's stable `/v1/hooks/...` URL.
  */
-const handleWebhook = (scheduledTasks: ScheduledTaskService["Service"]) =>
+const handleWebhook = (scheduledTasks: ScheduledTaskService.ScheduledTaskService["Service"]) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
     if (Option.isNone(url)) return json(400, { error: "bad_request" });
 
     const [hookId, token, ...rest] = url.value.pathname
-      .slice(`${WEBHOOK_ROUTE_PREFIX}/`.length)
+      .slice(`${ScheduledTaskService.WEBHOOK_ROUTE_PREFIX}/`.length)
       .split("/");
     if (!hookId || !token || rest.length > 0) return json(404, { error: "hook_not_found" });
     let taskId: string;
@@ -65,15 +65,17 @@ const handleWebhook = (scheduledTasks: ScheduledTaskService["Service"]) =>
         hookId: taskId,
         token,
         method: request.method,
-        path: `${WEBHOOK_ROUTE_PREFIX}/${hookId}`,
+        path: `${ScheduledTaskService.WEBHOOK_ROUTE_PREFIX}/${hookId}`,
         query: url.value.search.replace(/^\?/, ""),
         headers,
         body: body.value,
         bodyText: new TextDecoder().decode(body.value),
       })
       .pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("Webhook delivery failed", { error: error.message }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Webhook delivery failed").pipe(
+            Effect.annotateLogs({ hookId: taskId }),
+            Effect.andThen(Effect.logDebug("Webhook delivery failure cause", { cause })),
             Effect.as({ _tag: "error" as const }),
           ),
         ),
@@ -98,9 +100,9 @@ const handleWebhook = (scheduledTasks: ScheduledTaskService["Service"]) =>
 export const webhookRouteLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const router = yield* HttpRouter.HttpRouter;
-    const handler = handleWebhook(yield* ScheduledTaskService);
+    const handler = handleWebhook(yield* ScheduledTaskService.ScheduledTaskService);
     for (const method of ["POST", "PUT", "PATCH", "GET"] as const) {
-      yield* router.add(method, `${WEBHOOK_ROUTE_PREFIX}/*`, handler);
+      yield* router.add(method, `${ScheduledTaskService.WEBHOOK_ROUTE_PREFIX}/*`, handler);
     }
   }),
 );

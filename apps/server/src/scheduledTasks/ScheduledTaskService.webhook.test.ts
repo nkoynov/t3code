@@ -297,6 +297,63 @@ it.effect("keeps the newest 50 deliveries when they share a timestamp", () =>
   ),
 );
 
+it.effect("keeps credential headers out of the delivery log", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      yield* service.triggerWebhook(
+        requestFor(task, {
+          headers: {
+            "content-type": "application/json",
+            authorization: "Bearer sender-token",
+            "x-webhook-key": "k",
+            "x-github-event": "push",
+          },
+        }),
+      );
+      const [summary] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      const { delivery } = yield* service.getWebhookDelivery({
+        id: task.id,
+        deliveryId: summary!.id,
+      });
+      assert.equal(delivery.headers.authorization, "[redacted]");
+      assert.equal(delivery.headers["x-webhook-key"], "[redacted]");
+      assert.equal(delivery.headers["x-github-event"], "push");
+    }),
+  ),
+);
+
+it.effect("a delivery queued behind a run does not start once the task is paused", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* webhookTaskInput());
+          yield* service.triggerWebhook(requestFor(task));
+          const queued = yield* service.triggerWebhook(requestFor(task));
+          yield* Queue.take(launches);
+          yield* service.setEnabled({ id: task.id, enabled: false });
+          yield* Deferred.succeed(gate, undefined);
+          // The queued delivery is marked failed instead of launching.
+          const deliveryId = queued._tag === "accepted" ? queued.deliveryId : undefined;
+          let outcome = "accepted";
+          while (outcome === "accepted") {
+            yield* Effect.yieldNow;
+            const { delivery } = yield* service.getWebhookDelivery({
+              id: task.id,
+              deliveryId: deliveryId!,
+            });
+            outcome = delivery.outcome;
+          }
+          assert.equal(outcome, "dispatch_failed");
+          assert.equal(yield* Queue.size(launches), 0);
+        }),
+      { gate },
+    );
+  }),
+);
+
 it.effect("deleting a task removes its delivery log", () =>
   withService(({ service }) =>
     Effect.gen(function* () {

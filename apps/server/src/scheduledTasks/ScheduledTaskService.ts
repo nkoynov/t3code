@@ -220,6 +220,19 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** Headers kept out of the delivery log because they commonly carry credentials. */
+const REDACTED_HEADER =
+  /^(authorization|proxy-authorization|cookie|set-cookie)$|token|secret|signature|key|password|auth/i;
+
+function redactHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [
+      name,
+      REDACTED_HEADER.test(name) ? "[redacted]" : value,
+    ]),
+  );
+}
+
 function webhookPath(taskId: string, token: string): string {
   return `${WEBHOOK_ROUTE_PREFIX}/${encodeURIComponent(taskId)}/${token}`;
 }
@@ -667,6 +680,13 @@ export const layer = Layer.effect(
             DateTime.toEpochMillis(parsedNextRunAt.value) > DateTime.toEpochMillis(startedAt))
         ) {
           return active;
+        }
+        // A queued delivery must not run a task that was paused, or deleted
+        // and recreated under the same id, while it waited for its turn.
+        if (webhook !== undefined && (!active.enabled || active.createdAt !== task.createdAt)) {
+          return yield* taskError("The task was paused or replaced before this delivery ran.", {
+            taskId: task.id,
+          });
         }
 
         yield* markRunning(active.id, startedAtIso);
@@ -1137,24 +1157,23 @@ export const layer = Layer.effect(
       return sql
         .withTransaction(
           Effect.gen(function* () {
-            yield* sql`INSERT INTO scheduled_task_webhook_deliveries ${sql.insert({
-              delivery_id: input.id,
-              task_id: input.taskId,
-              received_at: input.receivedAt,
-              method: input.request.method,
-              query: input.request.query,
-              headers_json: encodeHeadersJson(input.request.headers),
-              body: truncated
-                ? input.request.bodyText.slice(0, WEBHOOK_DELIVERY_LOG_BODY_LIMIT)
-                : input.request.bodyText,
-              body_bytes: input.request.body.byteLength,
-              body_truncated: truncated ? 1 : 0,
-              outcome: input.outcome,
-              signature_verified: input.signatureVerified ? 1 : 0,
-              missing_fields_json: encodeMissingFieldsJson(input.missing),
-              rendered_prompt: input.renderedPrompt,
-              error: null,
-            })}`;
+            // Conditional on the task existing, so a delivery racing a delete
+            // cannot leave rows that a recreated task with the same id would show.
+            yield* sql`
+              INSERT INTO scheduled_task_webhook_deliveries (
+                delivery_id, task_id, received_at, method, query, headers_json, body,
+                body_bytes, body_truncated, outcome, signature_verified,
+                missing_fields_json, rendered_prompt, error
+              )
+              SELECT
+                ${input.id}, ${input.taskId}, ${input.receivedAt}, ${input.request.method},
+                ${input.request.query}, ${encodeHeadersJson(redactHeaders(input.request.headers))},
+                ${truncated ? input.request.bodyText.slice(0, WEBHOOK_DELIVERY_LOG_BODY_LIMIT) : input.request.bodyText},
+                ${input.request.body.byteLength}, ${truncated ? 1 : 0}, ${input.outcome},
+                ${input.signatureVerified ? 1 : 0}, ${encodeMissingFieldsJson(input.missing)},
+                ${input.renderedPrompt}, NULL
+              WHERE EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${input.taskId})
+            `;
             yield* sql`
             DELETE FROM scheduled_task_webhook_deliveries
             WHERE task_id = ${input.taskId}
@@ -1311,10 +1330,16 @@ export const layer = Layer.effect(
         yield* runTask(task, "webhook", { deliveryId, prompt: rendered.prompt }).pipe(
           Effect.flatMap((completed) =>
             completed.lastRunStatus === "failed"
-              ? markDeliveryFailed(deliveryId, completed.lastRunError ?? "Dispatch failed.")
+              ? markDeliveryFailed(deliveryId, "The run failed to start.")
               : Effect.void,
           ),
-          Effect.catchCause((cause) => markDeliveryFailed(deliveryId, errorMessage(cause))),
+          // The log is readable over RPC, so it gets a fixed reason; the
+          // cause, which can carry request data, stays in the server log.
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Webhook dispatch failed", { taskId: task.id, cause }).pipe(
+              Effect.andThen(markDeliveryFailed(deliveryId, "The run failed to start.")),
+            ),
+          ),
           permit.withPermits(1),
           Effect.forkIn(serviceScope),
         );
