@@ -51,19 +51,26 @@ export const redactRelayHookUrl = (url: string): string => {
 };
 
 /**
- * Request budget for public hook forwarding, keyed by a hash of the full hook
- * URL (environment, hook and token). Requests with a wrong token get their own
+ * Request budget for public hook forwarding, keyed by a hash of the hook URL
+ * (environment, hook and token). Requests with a wrong token get their own
  * budget, so they cannot use up a real sender's; the environment rejects them.
+ * Built from decoded segments, because the environment decodes them too: two
+ * spellings of one token (`token`, `%74oken`) must share one budget.
  */
 const hookBudgetKey = (hook: {
   readonly environmentId: string;
-  readonly rawHookId: string;
-  readonly rawToken: string;
+  readonly hookId: string;
+  readonly token: string;
 }) =>
   Effect.promise(() =>
     crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(`${hook.environmentId}/${hook.rawHookId}/${hook.rawToken}`),
+      // Length-prefixed, so no segment contents can make two keys collide.
+      new TextEncoder().encode(
+        [hook.environmentId, hook.hookId, hook.token]
+          .map((part) => `${part.length}:${part}`)
+          .join(""),
+      ),
     ),
   ).pipe(
     Effect.map((digest) =>
@@ -105,6 +112,7 @@ function parseHookPath(url: string) {
     return {
       environmentId: decodeURIComponent(rawEnvironmentId),
       hookId: decodeURIComponent(rawHookId),
+      token: decodeURIComponent(rawToken),
       // Forward the encoded segments byte-for-byte; the environment decodes them.
       rawHookId,
       rawToken,

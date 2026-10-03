@@ -366,6 +366,15 @@ describe("HookForwarder", () => {
     }),
   );
 
+  it.effect("gives two spellings of one token a single budget", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      yield* harness.send(new Request(hookUrl("hook-1/token"), { method: "POST", body: "{}" }));
+      yield* harness.send(new Request(hookUrl("hook-1/%74oken"), { method: "POST", body: "{}" }));
+      expect(new Set(harness.rateLimitKeys).size).toBe(1);
+    }),
+  );
+
   it.effect("returns 429 when the hook's budget is spent", () =>
     Effect.gen(function* () {
       const harness = makeHarness({ allow: () => false });
