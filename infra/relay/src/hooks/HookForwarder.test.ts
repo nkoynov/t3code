@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -315,10 +316,17 @@ describe("HookForwarder", () => {
 
   it.effect("maps an upstream timeout to 504", () =>
     Effect.gen(function* () {
-      const harness = makeHarness({ execute: () => Effect.never });
+      // Advance the clock only once the request is waiting on the environment;
+      // hashing the budget key before that step is asynchronous.
+      const reachedUpstream = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        execute: () =>
+          Deferred.succeed(reachedUpstream, undefined).pipe(Effect.andThen(Effect.never)),
+      });
       const fiber = yield* harness
         .send(new Request(hookUrl(), { method: "POST", body: "{}" }))
         .pipe(Effect.forkChild);
+      yield* Deferred.await(reachedUpstream);
       yield* TestClock.adjust(Duration.millis(HookForwarder.RELAY_HOOK_UPSTREAM_TIMEOUT_MS));
       const response = yield* Fiber.join(fiber);
       expect(response.status).toBe(504);
