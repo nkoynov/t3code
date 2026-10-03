@@ -707,6 +707,8 @@ function WebhookEndpointField({
           size="sm"
           variant="outline"
           type="button"
+          // A bare path is not a URL a sender can call.
+          disabled={!url.startsWith("http")}
           onClick={() => copyToClipboard(url, undefined)}
         >
           <CopyIcon />
@@ -782,7 +784,10 @@ function ScheduledTaskEditorDialog({
     tasksQuery.data !== null &&
     !tasksQuery.data.tasks.some((entry) => entry.id === draft.editingId);
   // The live row, so a rotated URL shows up without reopening the dialog.
-  const liveTask = tasksQuery.data?.tasks.find((entry) => entry.id === draft.editingId) ?? task;
+  // Once the list has loaded, a missing task is gone; don't keep showing its URL.
+  const liveTask = tasksQuery.data
+    ? (tasksQuery.data.tasks.find((entry) => entry.id === draft.editingId) ?? null)
+    : task;
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
 
