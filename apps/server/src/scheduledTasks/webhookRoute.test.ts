@@ -1,15 +1,26 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Etag from "effect/unstable/http/Etag";
+import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpApi from "effect/unstable/httpapi/HttpApi";
+import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
-import { ScheduledTaskWebhookDeliveryId, ScheduledTaskError } from "@t3tools/contracts";
+import {
+  EnvironmentHttpApi,
+  ScheduledTaskWebhookDeliveryId,
+  ScheduledTaskError,
+} from "@t3tools/contracts";
 import {
   ScheduledTaskService,
   type WebhookTriggerRequest,
   type WebhookTriggerResult,
 } from "./ScheduledTaskService.ts";
-import { WEBHOOK_MAX_BODY_BYTES, webhookRouteLayer } from "./webhookRoute.ts";
+import { WEBHOOK_MAX_BODY_BYTES, webhookHttpApiLayer } from "./webhookRoute.ts";
+
+class WebhookTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.webhooks) {}
 
 const handlerFor = (
   trigger: (
@@ -17,8 +28,16 @@ const handlerFor = (
   ) => Effect.Effect<WebhookTriggerResult, ScheduledTaskError>,
 ) =>
   HttpRouter.toWebHandler(
-    webhookRouteLayer.pipe(
+    HttpApiBuilder.layer(WebhookTestApi).pipe(
+      Layer.provide(webhookHttpApiLayer),
       Layer.provide(Layer.mock(ScheduledTaskService)({ triggerWebhook: trigger })),
+      Layer.provide(
+        HttpPlatform.layer.pipe(
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(Etag.layerWeak),
+        ),
+      ),
+      Layer.provide(NodeServices.layer),
     ),
     { disableLogger: true },
   );
