@@ -347,6 +347,12 @@ function ScheduledTaskEnvironmentSection({
               description="This task no longer exists or is outside the selected project scope."
               role="status"
             />
+          ) : linkedTask?.schedule.type === "webhook" ? (
+            <SettingsRow
+              title="Webhook tasks can't be edited here yet"
+              description="Update T3 Code to edit this task."
+              role="status"
+            />
           ) : null}
           {tasks.length === 0 ? (
             <SettingsRow
@@ -455,7 +461,7 @@ function ScheduledTaskRow({
                 <PencilIcon />
                 Edit
               </MenuItem>
-              <MenuItem onClick={() => void act("run")}>
+              <MenuItem onClick={() => void act("run")} disabled={task.schedule.type === "webhook"}>
                 <PlayIcon />
                 Run now
               </MenuItem>
