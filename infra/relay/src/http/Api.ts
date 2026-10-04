@@ -66,6 +66,7 @@ import * as DpopProofs from "../auth/DpopProofs.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
 import * as EnvironmentCredentials from "../environments/EnvironmentCredentials.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
+import * as HookMailbox from "../hooks/HookMailbox.ts";
 import * as LiveActivities from "../agentActivity/LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as AgentActivityPublisher from "../agentActivity/AgentActivityPublisher.ts";
@@ -513,6 +514,15 @@ export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnviron
             environmentId: link.environmentId,
             environmentPublicKey: link.environmentPublicKey,
           });
+    // Held webhook requests belong to the environment, not one user's link;
+    // drop them once no user has it linked any more.
+    const remaining = yield* links.findActiveManagedForEnvironment({
+      environmentId: input.environmentId,
+    });
+    if (remaining.length === 0) {
+      const mailbox = yield* HookMailbox.HookMailbox;
+      yield* mailbox.clearEnvironment({ environmentId: input.environmentId });
+    }
 
     // External teardown cannot share the SQL transaction. Run it only after
     // revocation commits so a database failure leaves a fully usable active
@@ -1127,6 +1137,15 @@ export const serverApi = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
     const publishSignatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
+    const links = yield* EnvironmentLinks.EnvironmentLinks;
+    const mailbox = yield* HookMailbox.HookMailbox;
+    const requireOwnEnvironment = (environmentId: string) =>
+      Effect.gen(function* () {
+        const principal = yield* RelayEnvironmentPrincipal;
+        if (principal.environmentId !== environmentId) {
+          return yield* new HttpApiError.Unauthorized({});
+        }
+      });
     const activityHandlers = handlers.handle(
       "publishAgentActivity",
       Effect.fn("relay.api.server.publishAgentActivity")(
@@ -1336,6 +1355,50 @@ export const serverApi = HttpApiBuilder.group(
           }),
           mapRelayCommonApiErrors("not_authorized"),
         ),
+      )
+      .handle(
+        "updateLinkPreferences",
+        Effect.fn("relay.api.server.updateLinkPreferences")(function* ({ params, payload }) {
+          yield* requireOwnEnvironment(params.environmentId);
+          yield* links.setHoldWebhooksWhileOffline({
+            environmentId: params.environmentId,
+            holdWebhooksWhileOffline: payload.holdWebhooksWhileOffline,
+          });
+          return payload;
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "listPendingHooks",
+        Effect.fn("relay.api.server.listPendingHooks")(function* ({ params, query }) {
+          yield* requireOwnEnvironment(params.environmentId);
+          const held = yield* mailbox.listPending({
+            environmentId: params.environmentId,
+            limit: query.limit ?? HookMailbox.HOOK_MAILBOX_MAX_PULL,
+          });
+          return {
+            deliveries: held.map((hook) => ({
+              id: hook.id,
+              receivedAt: hook.receivedAt,
+              method: hook.method,
+              rawHookId: hook.rawHookId,
+              rawToken: hook.rawToken,
+              query: hook.query,
+              headers: hook.headers,
+              bodyBase64: Buffer.from(hook.body).toString("base64"),
+            })),
+          };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "ackPendingHooks",
+        Effect.fn("relay.api.server.ackPendingHooks")(function* ({ params, payload }) {
+          yield* requireOwnEnvironment(params.environmentId);
+          const deleted = yield* mailbox.ack({
+            environmentId: params.environmentId,
+            ids: payload.ids,
+          });
+          return { deleted };
+        }, mapRelayCommonApiErrors("not_authorized")),
       );
   }),
 );
@@ -1378,6 +1441,8 @@ const RelayCommonPersistenceError = Schema.Union([
   AgentActivityRows.AgentActivityRowListPersistenceError,
   LiveActivities.LiveActivityDeliveryMarkPersistenceError,
   DeliveryAttempts.DeliveryAttemptRecordPersistenceError,
+  EnvironmentLinks.EnvironmentLinkEnvironmentLookupPersistenceError,
+  HookMailbox.HookMailboxPersistenceError,
 ]);
 type RelayCommonPersistenceError = typeof RelayCommonPersistenceError.Type;
 const isRelayCommonPersistenceError = Schema.is(RelayCommonPersistenceError);

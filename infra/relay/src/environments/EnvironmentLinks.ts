@@ -130,9 +130,19 @@ export class EnvironmentLinks extends Context.Service<
     readonly findActiveManagedForEnvironment: (input: {
       readonly environmentId: string;
     }) => Effect.Effect<
-      ReadonlyArray<RelayLinkedEnvironmentRecord & { readonly userId: string }>,
+      ReadonlyArray<
+        RelayLinkedEnvironmentRecord & {
+          readonly userId: string;
+          readonly holdWebhooksWhileOffline: boolean;
+        }
+      >,
       EnvironmentLinkEnvironmentLookupPersistenceError
     >;
+    /** Sets the webhook-hold opt-in on every active link of an environment. */
+    readonly setHoldWebhooksWhileOffline: (input: {
+      readonly environmentId: string;
+      readonly holdWebhooksWhileOffline: boolean;
+    }) => Effect.Effect<void, EnvironmentLinkEnvironmentLookupPersistenceError>;
     readonly revokeForUser: (input: {
       readonly userId: string;
       readonly environmentId: string;
@@ -355,6 +365,7 @@ const make = Effect.gen(function* () {
           endpointWsBaseUrl: relayEnvironmentLinks.endpointWsBaseUrl,
           endpointProviderKind: relayEnvironmentLinks.endpointProviderKind,
           createdAt: relayEnvironmentLinks.createdAt,
+          holdWebhooksWhileOffline: relayEnvironmentLinks.holdWebhooksWhileOffline,
         })
         .from(relayEnvironmentLinks)
         .where(
@@ -382,8 +393,33 @@ const make = Effect.gen(function* () {
               },
               environmentPublicKey: row.environmentPublicKey,
               linkedAt: row.createdAt,
+              holdWebhooksWhileOffline: row.holdWebhooksWhileOffline,
             })),
           ),
+          Effect.mapError(
+            (cause) =>
+              new EnvironmentLinkEnvironmentLookupPersistenceError({
+                environmentId: input.environmentId,
+                cause,
+              }),
+          ),
+        );
+    }),
+
+    setHoldWebhooksWhileOffline: Effect.fn(
+      "relay.environment_links.set_hold_webhooks_while_offline",
+    )(function* (input) {
+      yield* Effect.annotateCurrentSpan({ "relay.environment_id": input.environmentId });
+      yield* db
+        .update(relayEnvironmentLinks)
+        .set({ holdWebhooksWhileOffline: input.holdWebhooksWhileOffline })
+        .where(
+          and(
+            eq(relayEnvironmentLinks.environmentId, input.environmentId),
+            isNull(relayEnvironmentLinks.revokedAt),
+          ),
+        )
+        .pipe(
           Effect.mapError(
             (cause) =>
               new EnvironmentLinkEnvironmentLookupPersistenceError({

@@ -74,6 +74,7 @@ import * as ManagedEndpointReaper from "./environments/ManagedEndpointReaper.ts"
 import * as ManagedTunnelLimits from "./environments/ManagedTunnelLimits.ts";
 import * as MobileRegistrations from "./agentActivity/MobileRegistrations.ts";
 import * as HookForwarder from "./hooks/HookForwarder.ts";
+import * as HookMailbox from "./hooks/HookMailbox.ts";
 
 const webcryptoLayer = Layer.succeed(
   Crypto.Crypto,
@@ -269,7 +270,7 @@ export const ApiLive = Api.make(
       Layer.provideMerge(
         ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
       ),
-      Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer)),
+      Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer, HookMailbox.layer)),
       Layer.provideMerge(EnvironmentCredentials.layer),
       Layer.provideMerge(
         Layer.mergeAll(
@@ -368,6 +369,14 @@ export const ApiLive = Api.make(
                   activityRows.pruneTerminal({
                     updatedBefore: DateTime.formatIso(DateTime.subtract(now, { minutes: 30 })),
                   }),
+                ),
+              ),
+            ),
+            // Held webhook requests expire 24 hours after the relay received them.
+            Effect.andThen(
+              Effect.all([HookMailbox.HookMailbox, DateTime.now]).pipe(
+                Effect.flatMap(([mailbox, now]) =>
+                  mailbox.pruneExpired({ now: DateTime.formatIso(now) }),
                 ),
               ),
             ),

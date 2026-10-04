@@ -1,5 +1,6 @@
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import { RelayApi } from "@t3tools/contracts/relay";
 import * as Deferred from "effect/Deferred";
@@ -31,6 +32,7 @@ import {
   traceRelayHttpRequestWith,
 } from "../http/Api.ts";
 import * as HookForwarder from "./HookForwarder.ts";
+import * as HookMailbox from "./HookMailbox.ts";
 
 const settings: RelayConfiguration.RelayConfiguration["Service"] = {
   relayIssuer: "https://relay.example.test",
@@ -70,6 +72,7 @@ const managedLink = {
   },
   environmentPublicKey: "public-key",
   linkedAt: "2026-05-25T00:00:00.000Z",
+  holdWebhooksWhileOffline: false,
 };
 
 interface Harness {
@@ -79,11 +82,14 @@ interface Harness {
   readonly links?: ReadonlyArray<typeof managedLink>;
   readonly allocation?: ManagedEndpointAllocations.ManagedEndpointAllocation | null;
   readonly allow?: (key: string) => boolean;
+  /** Mailbox capacity; enqueue reports full once this many requests are held. */
+  readonly mailboxCapacity?: number;
 }
 
 function makeHarness(options: Harness = {}) {
   const sent: Array<HttpClientRequest.HttpClientRequest> = [];
   const rateLimitKeys: Array<string> = [];
+  const held: Array<HookMailbox.HeldHook> = [];
   const execute =
     options.execute ??
     ((request: HttpClientRequest.HttpClientRequest) =>
@@ -114,6 +120,15 @@ function makeHarness(options: Harness = {}) {
             return execute(request);
           }),
         ),
+        Layer.mock(HookMailbox.HookMailbox, {
+          enqueue: (hook) =>
+            Effect.sync(() => {
+              if (held.length >= (options.mailboxCapacity ?? Infinity)) return false;
+              held.push(hook);
+              return true;
+            }),
+        }),
+        NodeCrypto.layer,
         Layer.succeed(HookForwarder.HookRateLimiter, {
           allow: (key) =>
             Effect.sync(() => {
@@ -144,7 +159,7 @@ function makeHarness(options: Harness = {}) {
         ),
       );
     });
-  return { sent, rateLimitKeys, send, httpEffect };
+  return { sent, rateLimitKeys, held, send, httpEffect };
 }
 
 const hookUrl = (path = "hook-1/secret-token", query = "") =>
@@ -442,4 +457,80 @@ describe("HookForwarder", () => {
       );
     }),
   );
+
+  describe("holding requests while the environment is offline", () => {
+    const offline = (request: HttpClientRequest.HttpClientRequest) =>
+      Effect.fail(
+        new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({ request, cause: new Error("offline") }),
+        }),
+      );
+
+    it.effect("stays a plain proxy when the environment has not opted in", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({ execute: offline });
+        const response = yield* harness.send(
+          new Request(hookUrl(), { method: "POST", body: "{}" }),
+        );
+        expect(response.status).toBe(503);
+        expect(harness.held).toHaveLength(0);
+      }),
+    );
+
+    it.effect("holds the exact request and answers 202 once opted in", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          execute: offline,
+          links: [{ ...managedLink, holdWebhooksWhileOffline: true }],
+        });
+        const body = new Uint8Array([0, 255, 10]);
+        const response = yield* harness.send(
+          new Request(hookUrl("hook-1/tok%2Fen", "?a=1"), {
+            method: "POST",
+            body,
+            headers: { "x-t3-relay-delivery-id": "forged", "x-sig": "s" },
+          }),
+        );
+        expect(response.status).toBe(202);
+        const [hook] = harness.held;
+        expect(hook?.rawToken).toBe("tok%2Fen");
+        expect(hook?.query).toBe("a=1");
+        expect([...(hook?.body ?? [])]).toEqual([0, 255, 10]);
+        expect(hook?.headers["x-sig"]).toBe("s");
+        // The sender cannot choose the delivery id.
+        expect(hook?.headers["x-t3-relay-delivery-id"]).toBeUndefined();
+        expect(hook?.id).not.toBe("forged");
+      }),
+    );
+
+    it.effect("answers 503 mailbox_full when the environment's mailbox is full", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness({
+          execute: offline,
+          links: [{ ...managedLink, holdWebhooksWhileOffline: true }],
+          mailboxCapacity: 0,
+        });
+        const response = yield* harness.send(
+          new Request(hookUrl(), { method: "POST", body: "{}" }),
+        );
+        expect(response.status).toBe(503);
+        expect(yield* readJson(response)).toEqual({ error: "mailbox_full" });
+      }),
+    );
+
+    it.effect("tags every forward with a relay delivery id", () =>
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        yield* harness.send(
+          new Request(hookUrl(), {
+            method: "POST",
+            body: "{}",
+            headers: { "x-t3-relay-delivery-id": "forged" },
+          }),
+        );
+        const id = harness.sent[0]?.headers["x-t3-relay-delivery-id"];
+        expect(id).toMatch(/^[0-9a-f-]{36}$/);
+      }),
+    );
+  });
 });

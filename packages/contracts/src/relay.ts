@@ -1136,6 +1136,41 @@ const RelayDpopClientGroup = HttpApiGroup.make("dpopClient")
   .annotate(OpenApi.Description, "DPoP-authenticated client access to linked environments.")
   .middleware(RelayDpopClientAuth);
 
+export const RelayEnvironmentLinkPreferencesRequest = Schema.Struct({
+  holdWebhooksWhileOffline: Schema.Boolean,
+});
+export type RelayEnvironmentLinkPreferencesRequest =
+  typeof RelayEnvironmentLinkPreferencesRequest.Type;
+
+/** A webhook request the relay held because the environment was offline. */
+export const RelayPendingHook = Schema.Struct({
+  id: Schema.String,
+  receivedAt: Schema.String,
+  method: Schema.String,
+  /** Path segments exactly as the sender sent them; the environment decodes them. */
+  rawHookId: Schema.String,
+  rawToken: Schema.String,
+  query: Schema.String,
+  headers: Schema.Record(Schema.String, Schema.String),
+  bodyBase64: Schema.String,
+});
+export type RelayPendingHook = typeof RelayPendingHook.Type;
+
+export const RelayPendingHooksResponse = Schema.Struct({
+  deliveries: Schema.Array(RelayPendingHook),
+});
+export type RelayPendingHooksResponse = typeof RelayPendingHooksResponse.Type;
+
+export const RelayAckHooksRequest = Schema.Struct({
+  ids: Schema.Array(Schema.String),
+});
+export type RelayAckHooksRequest = typeof RelayAckHooksRequest.Type;
+
+export const RelayAckHooksResponse = Schema.Struct({
+  deleted: Schema.Number,
+});
+export type RelayAckHooksResponse = typeof RelayAckHooksResponse.Type;
+
 const RelayServerGroup = HttpApiGroup.make("server")
   .add(
     HttpApiEndpoint.post(
@@ -1171,6 +1206,28 @@ const RelayServerGroup = HttpApiGroup.make("server")
         error: RelayAgentActivityPublishErrors,
       },
     ).annotate(OpenApi.Summary, "Publish agent activity"),
+    HttpApiEndpoint.post(
+      "updateLinkPreferences",
+      "/v1/environments/:environmentId/link-preferences",
+      {
+        params: Schema.Struct({ environmentId: EnvironmentId }),
+        payload: RelayEnvironmentLinkPreferencesRequest,
+        success: RelayEnvironmentLinkPreferencesRequest,
+        error: RelayAuthAndInternalErrors,
+      },
+    ).annotate(OpenApi.Summary, "Update an environment's link preferences"),
+    HttpApiEndpoint.get("listPendingHooks", "/v1/environments/:environmentId/hooks/pending", {
+      params: Schema.Struct({ environmentId: EnvironmentId }),
+      query: Schema.Struct({ limit: Schema.optional(Schema.NumberFromString) }),
+      success: RelayPendingHooksResponse,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "List webhook requests held while the environment was offline"),
+    HttpApiEndpoint.post("ackPendingHooks", "/v1/environments/:environmentId/hooks/ack", {
+      params: Schema.Struct({ environmentId: EnvironmentId }),
+      payload: RelayAckHooksRequest,
+      success: RelayAckHooksResponse,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "Delete delivered webhook requests"),
   )
   .annotate(OpenApi.Description, "Environment-authenticated activity publication.")
   .middleware(RelayEnvironmentAuth);

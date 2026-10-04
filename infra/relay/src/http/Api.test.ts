@@ -61,6 +61,7 @@ import {
 import * as RelayConfiguration from "../Config.ts";
 import * as RelayDb from "../db.ts";
 import * as EnvironmentCredentials from "../environments/EnvironmentCredentials.ts";
+import * as HookMailbox from "../hooks/HookMailbox.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvider.ts";
@@ -124,6 +125,7 @@ describe("device listing compatibility", () => {
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(RelayDb.RelayTransactions, {}),
+          Layer.mock(HookMailbox.HookMailbox, {}),
         ),
       ),
       Layer.provide(
@@ -317,8 +319,12 @@ function relayUnlinkTestLayer(input?: {
   readonly provision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["provision"];
   readonly reconcileOrigin?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["reconcileOrigin"];
   readonly release?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["release"];
+  readonly clearMailbox?: HookMailbox.HookMailbox["Service"]["clearEnvironment"];
 }) {
   return Layer.mergeAll(
+    Layer.mock(HookMailbox.HookMailbox, {
+      clearEnvironment: input?.clearMailbox ?? (() => Effect.void),
+    }),
     Layer.succeed(
       RelayDb.RelayTransactions,
       RelayDb.RelayTransactions.of({
@@ -333,6 +339,7 @@ function relayUnlinkTestLayer(input?: {
         listForUser: () => Effect.die("unused listForUser"),
         getForUser: input?.getForUser ?? (() => Effect.succeed(null)),
         findActiveManagedForEnvironment: () => Effect.succeed([]),
+        setHoldWebhooksWhileOffline: () => Effect.void,
         revokeForUser: input?.revokeForUser ?? (() => Effect.succeed(false)),
       }),
     ),
@@ -1215,7 +1222,12 @@ describe("relay routing fallback", () => {
                 Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
               ),
             ),
-            Layer.provide([publisher, signatures]),
+            Layer.provide([
+              publisher,
+              signatures,
+              Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
+              Layer.mock(HookMailbox.HookMailbox, {}),
+            ]),
           ),
         ),
         Layer.provide(auth),

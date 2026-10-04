@@ -1,4 +1,6 @@
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -17,8 +19,11 @@ import * as RelayConfiguration from "../Config.ts";
 import { validateManagedEndpoint, withoutRedirects } from "../environments/EnvironmentConnector.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
+import * as HookMailbox from "./HookMailbox.ts";
 
 export const RELAY_HOOK_PATH_PREFIX = "/v1/hooks/";
+/** Set by the relay on every forward; the environment uses it as the delivery id. */
+export const RELAY_DELIVERY_ID_HEADER = "x-t3-relay-delivery-id";
 export const RELAY_HOOK_MAX_BODY_BYTES = 1_048_576;
 export const RELAY_HOOK_UPSTREAM_TIMEOUT_MS = 8_000;
 export const RELAY_HOOK_RATE_LIMIT = { limit: 60, periodSeconds: 60 } as const;
@@ -33,6 +38,8 @@ const DROPPED_REQUEST_HEADERS = new Set([
   "content-length",
   "cookie",
   "x-real-ip",
+  // Only the relay may set this; a sender could otherwise collide delivery ids.
+  "x-t3-relay-delivery-id",
 ]);
 const DROPPED_REQUEST_HEADER_PREFIXES = ["proxy-", "cf-", "x-forwarded-"];
 // Cloudflare answers 530 when the tunnel for a hostname has no connected origin.
@@ -186,6 +193,8 @@ const make = Effect.gen(function* () {
   const settings = yield* RelayConfiguration.RelayConfiguration;
   const httpClient = yield* HttpClient.HttpClient;
   const rateLimiter = yield* HookRateLimiter;
+  const mailbox = yield* HookMailbox.HookMailbox;
+  const crypto = yield* Crypto.Crypto;
 
   const resolveEndpoint = Effect.fn("relay.hooks.resolve_endpoint")(function* (
     environmentId: string,
@@ -199,7 +208,7 @@ const make = Effect.gen(function* () {
         baseDomain: settings.managedEndpointBaseDomain,
       });
       if (Result.isSuccess(result)) {
-        return result.success;
+        return { ...result.success, holdWhileOffline: link.holdWebhooksWhileOffline };
       }
     }
     return null;
@@ -259,7 +268,51 @@ const make = Effect.gen(function* () {
     const baseUrl = endpoint.httpBaseUrl.endsWith("/")
       ? endpoint.httpBaseUrl
       : `${endpoint.httpBaseUrl}/`;
-    const headers = forwardedHeaders(request.headers);
+    // One id per attempt, so a request that reached the environment before a
+    // timeout and is later replayed from the mailbox dispatches only once.
+    const deliveryId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+    const headers: Record<string, string> = {
+      ...forwardedHeaders(request.headers),
+      [RELAY_DELIVERY_ID_HEADER]: deliveryId,
+    };
+    // Held only for environments that opted in; otherwise the relay is a plain proxy.
+    const holdOrFail = (status: 503 | 504, error: string) =>
+      Effect.gen(function* () {
+        if (!endpoint.holdWhileOffline) {
+          yield* outcome(error);
+          return errorResponse(status, error);
+        }
+        const stored = yield* mailbox
+          .enqueue({
+            id: deliveryId,
+            environmentId: parsed.environmentId,
+            receivedAt: DateTime.formatIso(yield* DateTime.now),
+            method: request.method,
+            rawHookId: parsed.rawHookId,
+            rawToken: parsed.rawToken,
+            query: parsed.search.replace(/^\?/, ""),
+            headers: forwardedHeaders(request.headers),
+            body: body.success,
+          })
+          .pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Could not hold webhook request", {
+                environmentId: parsed.environmentId,
+                errorTag: cause._tag,
+              }).pipe(Effect.as(null)),
+            ),
+          );
+        if (stored === null) {
+          yield* outcome(error);
+          return errorResponse(status, error);
+        }
+        if (!stored) {
+          yield* outcome("mailbox_full");
+          return errorResponse(503, "mailbox_full");
+        }
+        yield* outcome("held");
+        return HttpServerResponse.jsonUnsafe({ queued: true }, { status: 202 });
+      });
     let upstreamRequest = HttpClientRequest.make(
       request.method as "GET" | "POST" | "PUT" | "PATCH",
     )(`${baseUrl}api/hooks/${parsed.rawHookId}/${parsed.rawToken}${parsed.search}`, { headers });
@@ -288,17 +341,14 @@ const make = Effect.gen(function* () {
       Effect.result,
     );
     if (Result.isFailure(upstream)) {
-      yield* outcome("environment_unavailable");
-      return errorResponse(503, "environment_unavailable");
+      return yield* holdOrFail(503, "environment_unavailable");
     }
     if (Option.isNone(upstream.success)) {
-      yield* outcome("environment_timeout");
-      return errorResponse(504, "environment_timeout");
+      return yield* holdOrFail(504, "environment_timeout");
     }
     const response = upstream.success.value;
     if (response.status === TUNNEL_OFFLINE_STATUS) {
-      yield* outcome("environment_unavailable");
-      return errorResponse(503, "environment_unavailable");
+      return yield* holdOrFail(503, "environment_unavailable");
     }
     yield* Effect.annotateCurrentSpan({
       "relay.hook.outcome": "forwarded",
