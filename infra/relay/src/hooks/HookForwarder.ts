@@ -125,10 +125,20 @@ function parseHookPath(url: string) {
 
 function forwardedHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
   const result: Record<string, string> = {};
+  // Headers the sender names in Connection are hop-by-hop too (RFC 9110 7.6.1).
+  const connectionValue =
+    Object.entries(headers).find(([name]) => name.toLowerCase() === "connection")?.[1] ?? "";
+  const nominated = new Set(
+    connectionValue
+      .split(",")
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean),
+  );
   for (const name in headers) {
     const lower = name.toLowerCase();
     if (
       DROPPED_REQUEST_HEADERS.has(lower) ||
+      nominated.has(lower) ||
       DROPPED_REQUEST_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix))
     ) {
       continue;

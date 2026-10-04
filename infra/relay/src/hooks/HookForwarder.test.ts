@@ -355,6 +355,22 @@ describe("HookForwarder", () => {
     }),
   );
 
+  it.effect("drops headers the sender names in Connection", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness();
+      yield* harness.send(
+        new Request(hookUrl(), {
+          method: "POST",
+          body: "{}",
+          headers: { connection: "x-hop, keep-alive", "x-hop": "1", "x-keep": "2" },
+        }),
+      );
+      const sent: Readonly<Record<string, string>> = harness.sent[0]?.headers ?? {};
+      expect(sent["x-hop"]).toBeUndefined();
+      expect(sent["x-keep"]).toBe("2");
+    }),
+  );
+
   it.effect("gives requests with a wrong token their own budget", () =>
     Effect.gen(function* () {
       const harness = makeHarness();
