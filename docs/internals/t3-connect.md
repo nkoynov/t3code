@@ -13,14 +13,21 @@ leaves token and signature verification to the environment
 By default the forwarder stores nothing. An environment can opt in to having
 the relay hold requests while it is offline
 (`hold_webhooks_while_offline` on its link). Only then does the relay store the
-raw request, including the hook token in the path, in `relay_hook_mailbox`.
-Rows are deleted when the environment acks them, after 24 hours, or when no
-user has the environment linked. The relay still never checks the token: the
-environment pulls held requests with its credential and runs them through the
-same verification. Every forward carries `x-t3-relay-delivery-id` so a request
-that reached the environment before a timeout and is later replayed runs once
-([mailbox](../../infra/relay/src/hooks/HookMailbox.ts),
-[drain](../../apps/server/src/relay/HookMailboxDrain.ts)).
+raw request, including the hook token in the path, in a Durable Object for
+that environment, with SQLite storage. The object pushes held requests back
+through the tunnel from its alarm, oldest first, and backs off while the
+environment stays away. When the tunnel reconnects, the environment asks the
+relay to deliver right away. Requests are deleted once the environment
+answers, after 24 hours, or when no user has the environment linked. The relay
+still never checks the token; delivery goes through the same environment route.
+Every forward carries `x-t3-relay-delivery-id`, so a request that reached the
+environment before a timeout and is delivered again later runs once
+([inbox object](../../infra/relay/src/hooks/HookInboxObject.ts)).
+
+A Durable Object, not Postgres or Queues, because held requests are write-once,
+read-once bodies of up to 1 MiB that need per-environment order, caps, and
+retry timing. Queues cap messages at 128 KB and cannot hold one environment's
+requests back while it is away.
 
 Clerk, deployment, and native authentication setup live in the
 [Connect setup runbook](../operations/connect-setup.md).

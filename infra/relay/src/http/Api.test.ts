@@ -61,7 +61,7 @@ import {
 import * as RelayConfiguration from "../Config.ts";
 import * as RelayDb from "../db.ts";
 import * as EnvironmentCredentials from "../environments/EnvironmentCredentials.ts";
-import * as HookMailbox from "../hooks/HookMailbox.ts";
+import * as HookInbox from "../hooks/HookInbox.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
 import * as ManagedEndpointProvider from "../environments/ManagedEndpointProvider.ts";
@@ -125,7 +125,7 @@ describe("device listing compatibility", () => {
           Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
           Layer.mock(ManagedEndpointProvider.ManagedEndpointProvider, {}),
           Layer.mock(RelayDb.RelayTransactions, {}),
-          Layer.mock(HookMailbox.HookMailbox, {}),
+          Layer.mock(HookInbox.HookInbox, {}),
         ),
       ),
       Layer.provide(
@@ -319,11 +319,12 @@ function relayUnlinkTestLayer(input?: {
   readonly provision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["provision"];
   readonly reconcileOrigin?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["reconcileOrigin"];
   readonly release?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["release"];
-  readonly clearMailbox?: HookMailbox.HookMailbox["Service"]["clearEnvironment"];
+  readonly clearInbox?: HookInbox.HookInbox["Service"]["clear"];
+  readonly activeLinks?: number;
 }) {
   return Layer.mergeAll(
-    Layer.mock(HookMailbox.HookMailbox, {
-      clearEnvironment: input?.clearMailbox ?? (() => Effect.void),
+    Layer.mock(HookInbox.HookInbox, {
+      clear: input?.clearInbox ?? (() => Effect.void),
     }),
     Layer.succeed(
       RelayDb.RelayTransactions,
@@ -338,7 +339,14 @@ function relayUnlinkTestLayer(input?: {
         listDeliveryUsersForEnvironment: () => Effect.die("unused listDeliveryUsersForEnvironment"),
         listForUser: () => Effect.die("unused listForUser"),
         getForUser: input?.getForUser ?? (() => Effect.succeed(null)),
-        findActiveManagedForEnvironment: () => Effect.succeed([]),
+        findActiveManagedForEnvironment: () =>
+          Effect.succeed(
+            Array.from({ length: input?.activeLinks ?? 0 }, () => ({
+              ...linkedEnvironmentRecord,
+              userId: "user-2",
+              holdWebhooksWhileOffline: true,
+            })),
+          ),
         setHoldWebhooksWhileOffline: () => Effect.void,
         revokeForUser: input?.revokeForUser ?? (() => Effect.succeed(false)),
       }),
@@ -906,6 +914,27 @@ describe("relay environment unlink", () => {
     );
   });
 
+  it.effect("drops held webhooks only once no user links the environment", () => {
+    const cleared: Array<string> = [];
+    const unlink = (activeLinks: number) =>
+      unlinkEnvironmentRecord({ userId: "user-1", environmentId: "environment-1" }).pipe(
+        Effect.provide(
+          relayUnlinkTestLayer({
+            activeLinks,
+            getForUser: () => Effect.succeed(linkedEnvironmentRecord),
+            revokeForUser: () => Effect.succeed(true),
+            clearInbox: ({ environmentId }) => Effect.sync(() => void cleared.push(environmentId)),
+          }),
+        ),
+      );
+    return Effect.gen(function* () {
+      yield* unlink(1);
+      expect(cleared).toEqual([]);
+      yield* unlink(0);
+      expect(cleared).toEqual(["environment-1"]);
+    });
+  });
+
   it.effect("commits database revocation before deprovisioning the managed endpoint", () => {
     const calls: Array<string> = [];
     const deprovisionTarget = {
@@ -1226,7 +1255,9 @@ describe("relay routing fallback", () => {
               publisher,
               signatures,
               Layer.mock(EnvironmentLinks.EnvironmentLinks, {}),
-              Layer.mock(HookMailbox.HookMailbox, {}),
+              Layer.mock(HookInbox.HookInbox, {}),
+              Layer.mock(ManagedEndpointAllocations.ManagedEndpointAllocations, {}),
+              Layer.succeed(RelayConfiguration.RelayConfiguration, relaySettings),
             ]),
           ),
         ),

@@ -9,7 +9,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 
 import * as RelayDb from "../db.ts";
 import { relayEnvironmentLinks } from "../persistence/schema.ts";
@@ -176,12 +176,21 @@ const make = Effect.gen(function* () {
       const now = DateTime.formatIso(yield* DateTime.now);
       const { request, proof } = input;
       const environmentId = proof.environmentId;
+      // The webhook-hold opt-in belongs to the environment: a new or re-made
+      // link carries it over from the environment's other active links.
+      const inheritedHoldWebhooks = sql<boolean>`EXISTS (
+        SELECT 1 FROM ${relayEnvironmentLinks} AS other
+        WHERE other.environment_id = ${environmentId}
+          AND other.revoked_at IS NULL
+          AND other.hold_webhooks_while_offline
+      )`;
       const { endpoint } = input;
       yield* db
         .insert(relayEnvironmentLinks)
         .values({
           userId: input.userId,
           environmentId,
+          holdWebhooksWhileOffline: inheritedHoldWebhooks,
           environmentLabel: proof.descriptor.label,
           environmentPublicKey: proof.environmentPublicKey,
           endpointHttpBaseUrl: endpoint.httpBaseUrl,
@@ -209,6 +218,7 @@ const make = Effect.gen(function* () {
             createdByDeviceId: request.deviceId ?? null,
             revokedAt: null,
             updatedAt: now,
+            holdWebhooksWhileOffline: inheritedHoldWebhooks,
           },
         })
         .pipe(

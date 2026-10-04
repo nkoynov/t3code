@@ -32,7 +32,9 @@ import {
   traceRelayHttpRequestWith,
 } from "../http/Api.ts";
 import * as HookForwarder from "./HookForwarder.ts";
-import * as HookMailbox from "./HookMailbox.ts";
+import * as HookInbox from "./HookInbox.ts";
+import type { HeldHook } from "./HookInboxStore.ts";
+import { RELAY_HOOK_UPSTREAM_TIMEOUT_MS } from "./upstream.ts";
 
 const settings: RelayConfiguration.RelayConfiguration["Service"] = {
   relayIssuer: "https://relay.example.test",
@@ -82,14 +84,14 @@ interface Harness {
   readonly links?: ReadonlyArray<typeof managedLink>;
   readonly allocation?: ManagedEndpointAllocations.ManagedEndpointAllocation | null;
   readonly allow?: (key: string) => boolean;
-  /** Mailbox capacity; enqueue reports full once this many requests are held. */
-  readonly mailboxCapacity?: number;
+  /** Inbox capacity; hold reports full once this many requests are held. */
+  readonly inboxCapacity?: number;
 }
 
 function makeHarness(options: Harness = {}) {
   const sent: Array<HttpClientRequest.HttpClientRequest> = [];
   const rateLimitKeys: Array<string> = [];
-  const held: Array<HookMailbox.HeldHook> = [];
+  const held: Array<HeldHook & { readonly baseUrl: string }> = [];
   const execute =
     options.execute ??
     ((request: HttpClientRequest.HttpClientRequest) =>
@@ -120,11 +122,11 @@ function makeHarness(options: Harness = {}) {
             return execute(request);
           }),
         ),
-        Layer.mock(HookMailbox.HookMailbox, {
-          enqueue: (hook) =>
+        Layer.mock(HookInbox.HookInbox, {
+          hold: ({ hook, baseUrl }) =>
             Effect.sync(() => {
-              if (held.length >= (options.mailboxCapacity ?? Infinity)) return false;
-              held.push(hook);
+              if (held.length >= (options.inboxCapacity ?? Infinity)) return false;
+              held.push({ ...hook, baseUrl });
               return true;
             }),
         }),
@@ -351,7 +353,7 @@ describe("HookForwarder", () => {
         .send(new Request(hookUrl(), { method: "POST", body: "{}" }))
         .pipe(Effect.forkChild);
       yield* Deferred.await(reachedUpstream);
-      yield* TestClock.adjust(Duration.millis(HookForwarder.RELAY_HOOK_UPSTREAM_TIMEOUT_MS));
+      yield* TestClock.adjust(Duration.millis(RELAY_HOOK_UPSTREAM_TIMEOUT_MS));
       const response = yield* Fiber.join(fiber);
       expect(response.status).toBe(504);
       expect(yield* readJson(response)).toEqual({ error: "environment_timeout" });
@@ -493,6 +495,7 @@ describe("HookForwarder", () => {
         );
         expect(response.status).toBe(202);
         const [hook] = harness.held;
+        expect(hook?.baseUrl).toBe("https://env.example.test/");
         expect(hook?.rawToken).toBe("tok%2Fen");
         expect(hook?.query).toBe("a=1");
         expect([...(hook?.body ?? [])]).toEqual([0, 255, 10]);
@@ -503,18 +506,18 @@ describe("HookForwarder", () => {
       }),
     );
 
-    it.effect("answers 503 mailbox_full when the environment's mailbox is full", () =>
+    it.effect("answers 503 inbox_full when the environment's inbox is full", () =>
       Effect.gen(function* () {
         const harness = makeHarness({
           execute: offline,
           links: [{ ...managedLink, holdWebhooksWhileOffline: true }],
-          mailboxCapacity: 0,
+          inboxCapacity: 0,
         });
         const response = yield* harness.send(
           new Request(hookUrl(), { method: "POST", body: "{}" }),
         );
         expect(response.status).toBe(503);
-        expect(yield* readJson(response)).toEqual({ error: "mailbox_full" });
+        expect(yield* readJson(response)).toEqual({ error: "inbox_full" });
       }),
     );
 

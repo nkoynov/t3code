@@ -74,7 +74,8 @@ import * as ManagedEndpointReaper from "./environments/ManagedEndpointReaper.ts"
 import * as ManagedTunnelLimits from "./environments/ManagedTunnelLimits.ts";
 import * as MobileRegistrations from "./agentActivity/MobileRegistrations.ts";
 import * as HookForwarder from "./hooks/HookForwarder.ts";
-import * as HookMailbox from "./hooks/HookMailbox.ts";
+import * as HookInbox from "./hooks/HookInbox.ts";
+import { HookInboxObject, HookInboxObjectLive } from "./hooks/HookInboxObject.ts";
 
 const webcryptoLayer = Layer.succeed(
   Crypto.Crypto,
@@ -198,6 +199,7 @@ export const ApiLive = Api.make(
         period: HookForwarder.RELAY_HOOK_RATE_LIMIT.periodSeconds,
       },
     });
+    const hookInboxes = yield* HookInboxObject;
 
     //
     // 3. Runtime layers and app construction
@@ -228,6 +230,34 @@ export const ApiLive = Api.make(
         ingestToken: axiomIngestToken,
       }).pipe(Effect.map(makeRelayTraceLayer)),
     );
+
+    // Each environment's held webhook requests live in its own Durable Object.
+    const inboxCall =
+      <A>(operation: HookInbox.HookInboxError["operation"], environmentId: string) =>
+      (effect: Effect.Effect<A, never, Alchemy.RuntimeContext>) =>
+        effect.pipe(
+          Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
+          Effect.catchCause((cause) =>
+            Effect.fail(
+              new HookInbox.HookInboxError({
+                operation,
+                environmentId,
+                cause: Cause.squash(cause),
+              }),
+            ),
+          ),
+        );
+    const hookInboxLayer = Layer.succeed(HookInbox.HookInbox, {
+      hold: ({ environmentId, baseUrl, hook }) =>
+        hookInboxes
+          .getByName(environmentId)
+          .hold(hook, baseUrl)
+          .pipe(inboxCall("hold", environmentId)),
+      wake: ({ environmentId, baseUrl }) =>
+        hookInboxes.getByName(environmentId).wake(baseUrl).pipe(inboxCall("wake", environmentId)),
+      clear: ({ environmentId }) =>
+        hookInboxes.getByName(environmentId).clear().pipe(inboxCall("clear", environmentId)),
+    });
 
     const runtimeLayer = Layer.empty.pipe(
       Layer.provideMerge(MobileRegistrations.layer),
@@ -270,7 +300,7 @@ export const ApiLive = Api.make(
       Layer.provideMerge(
         ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
       ),
-      Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer, HookMailbox.layer)),
+      Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer, hookInboxLayer)),
       Layer.provideMerge(EnvironmentCredentials.layer),
       Layer.provideMerge(
         Layer.mergeAll(
@@ -372,14 +402,6 @@ export const ApiLive = Api.make(
                 ),
               ),
             ),
-            // Held webhook requests expire 24 hours after the relay received them.
-            Effect.andThen(
-              Effect.all([HookMailbox.HookMailbox, DateTime.now]).pipe(
-                Effect.flatMap(([mailbox, now]) =>
-                  mailbox.pruneExpired({ now: DateTime.formatIso(now) }),
-                ),
-              ),
-            ),
             Effect.catchCause((cause) =>
               Cause.hasInterrupts(cause)
                 ? Effect.interrupt
@@ -435,6 +457,7 @@ export const ApiLive = Api.make(
         Layer.provideMerge(Cloudflare.Tunnel.ReadWriteTunnelBinding),
         Layer.provideMerge(Cloudflare.DNS.ReadWriteDnsHttp),
         Layer.provideMerge(Cloudflare.Workers.RateLimitBinding),
+        Layer.provideMerge(HookInboxObjectLive),
       ),
     ),
   ),

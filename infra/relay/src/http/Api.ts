@@ -66,7 +66,8 @@ import * as DpopProofs from "../auth/DpopProofs.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
 import * as EnvironmentCredentials from "../environments/EnvironmentCredentials.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
-import * as HookMailbox from "../hooks/HookMailbox.ts";
+import * as HookForwarder from "../hooks/HookForwarder.ts";
+import * as HookInbox from "../hooks/HookInbox.ts";
 import * as LiveActivities from "../agentActivity/LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as AgentActivityPublisher from "../agentActivity/AgentActivityPublisher.ts";
@@ -520,8 +521,8 @@ export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnviron
       environmentId: input.environmentId,
     });
     if (remaining.length === 0) {
-      const mailbox = yield* HookMailbox.HookMailbox;
-      yield* mailbox.clearEnvironment({ environmentId: input.environmentId });
+      const inbox = yield* HookInbox.HookInbox;
+      yield* inbox.clear({ environmentId: input.environmentId });
     }
 
     // External teardown cannot share the SQL transaction. Run it only after
@@ -1138,7 +1139,9 @@ export const serverApi = HttpApiBuilder.group(
     const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
     const publishSignatures = yield* EnvironmentPublishSignatures.EnvironmentPublishSignatures;
     const links = yield* EnvironmentLinks.EnvironmentLinks;
-    const mailbox = yield* HookMailbox.HookMailbox;
+    const inbox = yield* HookInbox.HookInbox;
+    const allocations = yield* ManagedEndpointAllocations.ManagedEndpointAllocations;
+    const settings = yield* RelayConfiguration.RelayConfiguration;
     const requireOwnEnvironment = (environmentId: string) =>
       Effect.gen(function* () {
         const principal = yield* RelayEnvironmentPrincipal;
@@ -1368,36 +1371,23 @@ export const serverApi = HttpApiBuilder.group(
         }, mapRelayCommonApiErrors("not_authorized")),
       )
       .handle(
-        "listPendingHooks",
-        Effect.fn("relay.api.server.listPendingHooks")(function* ({ params, query }) {
+        "wakeHeldHooks",
+        Effect.fn("relay.api.server.wakeHeldHooks")(function* ({ params }) {
           yield* requireOwnEnvironment(params.environmentId);
-          const held = yield* mailbox.listPending({
+          const endpoint = yield* HookForwarder.resolveHookEndpoint(params.environmentId).pipe(
+            Effect.provideService(EnvironmentLinks.EnvironmentLinks, links),
+            Effect.provideService(
+              ManagedEndpointAllocations.ManagedEndpointAllocations,
+              allocations,
+            ),
+            Effect.provideService(RelayConfiguration.RelayConfiguration, settings),
+          );
+          if (endpoint === null) return { pending: false };
+          const pending = yield* inbox.wake({
             environmentId: params.environmentId,
-            limit: query.limit ?? HookMailbox.HOOK_MAILBOX_MAX_PULL,
+            baseUrl: endpoint.httpBaseUrl,
           });
-          return {
-            deliveries: held.map((hook) => ({
-              id: hook.id,
-              receivedAt: hook.receivedAt,
-              method: hook.method,
-              rawHookId: hook.rawHookId,
-              rawToken: hook.rawToken,
-              query: hook.query,
-              headers: hook.headers,
-              bodyBase64: Buffer.from(hook.body).toString("base64"),
-            })),
-          };
-        }, mapRelayCommonApiErrors("not_authorized")),
-      )
-      .handle(
-        "ackPendingHooks",
-        Effect.fn("relay.api.server.ackPendingHooks")(function* ({ params, payload }) {
-          yield* requireOwnEnvironment(params.environmentId);
-          const deleted = yield* mailbox.ack({
-            environmentId: params.environmentId,
-            ids: payload.ids,
-          });
-          return { deleted };
+          return { pending };
         }, mapRelayCommonApiErrors("not_authorized")),
       );
   }),
@@ -1442,7 +1432,7 @@ const RelayCommonPersistenceError = Schema.Union([
   LiveActivities.LiveActivityDeliveryMarkPersistenceError,
   DeliveryAttempts.DeliveryAttemptRecordPersistenceError,
   EnvironmentLinks.EnvironmentLinkEnvironmentLookupPersistenceError,
-  HookMailbox.HookMailboxPersistenceError,
+  HookInbox.HookInboxError,
 ]);
 type RelayCommonPersistenceError = typeof RelayCommonPersistenceError.Type;
 const isRelayCommonPersistenceError = Schema.is(RelayCommonPersistenceError);

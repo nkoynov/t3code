@@ -1142,34 +1142,11 @@ export const RelayEnvironmentLinkPreferencesRequest = Schema.Struct({
 export type RelayEnvironmentLinkPreferencesRequest =
   typeof RelayEnvironmentLinkPreferencesRequest.Type;
 
-/** A webhook request the relay held because the environment was offline. */
-export const RelayPendingHook = Schema.Struct({
-  id: Schema.String,
-  receivedAt: Schema.String,
-  method: Schema.String,
-  /** Path segments exactly as the sender sent them; the environment decodes them. */
-  rawHookId: Schema.String,
-  rawToken: Schema.String,
-  query: Schema.String,
-  headers: Schema.Record(Schema.String, Schema.String),
-  bodyBase64: Schema.String,
+export const RelayWakeHeldHooksResponse = Schema.Struct({
+  /** True when the relay was holding requests and has started delivering them. */
+  pending: Schema.Boolean,
 });
-export type RelayPendingHook = typeof RelayPendingHook.Type;
-
-export const RelayPendingHooksResponse = Schema.Struct({
-  deliveries: Schema.Array(RelayPendingHook),
-});
-export type RelayPendingHooksResponse = typeof RelayPendingHooksResponse.Type;
-
-export const RelayAckHooksRequest = Schema.Struct({
-  ids: Schema.Array(Schema.String),
-});
-export type RelayAckHooksRequest = typeof RelayAckHooksRequest.Type;
-
-export const RelayAckHooksResponse = Schema.Struct({
-  deleted: Schema.Number,
-});
-export type RelayAckHooksResponse = typeof RelayAckHooksResponse.Type;
+export type RelayWakeHeldHooksResponse = typeof RelayWakeHeldHooksResponse.Type;
 
 const RelayServerGroup = HttpApiGroup.make("server")
   .add(
@@ -1216,18 +1193,14 @@ const RelayServerGroup = HttpApiGroup.make("server")
         error: RelayAuthAndInternalErrors,
       },
     ).annotate(OpenApi.Summary, "Update an environment's link preferences"),
-    HttpApiEndpoint.get("listPendingHooks", "/v1/environments/:environmentId/hooks/pending", {
+    HttpApiEndpoint.post("wakeHeldHooks", "/v1/environments/:environmentId/hooks/wake", {
       params: Schema.Struct({ environmentId: EnvironmentId }),
-      query: Schema.Struct({ limit: Schema.optional(Schema.NumberFromString) }),
-      success: RelayPendingHooksResponse,
+      success: RelayWakeHeldHooksResponse,
       error: RelayAuthAndInternalErrors,
-    }).annotate(OpenApi.Summary, "List webhook requests held while the environment was offline"),
-    HttpApiEndpoint.post("ackPendingHooks", "/v1/environments/:environmentId/hooks/ack", {
-      params: Schema.Struct({ environmentId: EnvironmentId }),
-      payload: RelayAckHooksRequest,
-      success: RelayAckHooksResponse,
-      error: RelayAuthAndInternalErrors,
-    }).annotate(OpenApi.Summary, "Delete delivered webhook requests"),
+    }).annotate(
+      OpenApi.Summary,
+      "Deliver webhook requests held while the environment was offline now",
+    ),
   )
   .annotate(OpenApi.Description, "Environment-authenticated activity publication.")
   .middleware(RelayEnvironmentAuth);

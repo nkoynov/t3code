@@ -6,7 +6,6 @@ import type {
 } from "@t3tools/contracts/relay";
 import {
   boolean,
-  bytea,
   index,
   integer,
   jsonb,
@@ -196,30 +195,5 @@ export const relayDpopProofs = pgTable(
   (table) => [
     primaryKey({ columns: [table.thumbprint, table.jti] }),
     index("idx_relay_dpop_proofs_expires_at").on(table.expiresAt),
-  ],
-);
-
-/**
- * Webhook requests held for an environment that opted in, while it was
- * offline. Rows are deleted once the environment acks them, after 24 hours, or
- * when the environment is unlinked.
- */
-export const relayHookMailbox = pgTable(
-  "relay_hook_mailbox",
-  {
-    id: varchar("id", { length: 36 }).primaryKey(),
-    environmentId: varchar("environment_id", { length: 191 }).notNull(),
-    receivedAt: varchar("received_at", { length: 64 }).notNull(),
-    expiresAt: varchar("expires_at", { length: 64 }).notNull(),
-    method: varchar("method", { length: 16 }).notNull(),
-    rawHookId: varchar("raw_hook_id", { length: 512 }).notNull(),
-    rawToken: varchar("raw_token", { length: 512 }).notNull(),
-    query: text("query").notNull(),
-    headers: jsonb("headers").notNull().$type<Record<string, string>>(),
-    body: bytea("body").notNull(),
-  },
-  (table) => [
-    index("idx_relay_hook_mailbox_environment").on(table.environmentId, table.receivedAt),
-    index("idx_relay_hook_mailbox_expires").on(table.expiresAt),
   ],
 );
