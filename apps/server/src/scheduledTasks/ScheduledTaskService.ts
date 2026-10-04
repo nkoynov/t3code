@@ -1227,6 +1227,14 @@ export const layer = Layer.effect(
                 ${input.signatureVerified ? 1 : 0}, ${encodeMissingFieldsJson(input.missing)},
                 ${input.renderedPrompt}, NULL
               WHERE EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${input.taskId})
+              -- A held request retried after a rate limit reuses its relay
+              -- delivery id; the newer attempt replaces the logged one.
+              ON CONFLICT (delivery_id) DO UPDATE SET
+                outcome = excluded.outcome,
+                signature_verified = excluded.signature_verified,
+                missing_fields_json = excluded.missing_fields_json,
+                rendered_prompt = excluded.rendered_prompt,
+                error = NULL
             `;
             yield* sql`
             DELETE FROM scheduled_task_webhook_deliveries
@@ -1336,17 +1344,35 @@ export const layer = Layer.effect(
             : `delivery:relay:${request.relayDeliveryId}`,
         );
         // A held request may already have reached this environment directly
-        // before a timeout; it runs once.
+        // before a timeout; it runs once. Claimed in its own table, kept longer
+        // than the relay holds a request, because the delivery log is trimmed.
+        // A rate-limited delivery stays held on the relay, so it must give up
+        // its claim or the next pass would treat it as already delivered.
+        const releaseClaim = <A>(result: A) =>
+          request.relayDeliveryId === undefined
+            ? Effect.succeed(result)
+            : sql`
+                DELETE FROM scheduled_task_webhook_relay_deliveries
+                WHERE relay_delivery_id = ${request.relayDeliveryId}
+              `.pipe(Effect.ignore, Effect.as(result));
         if (request.relayDeliveryId !== undefined) {
-          const seen = yield* sql<{ delivery_id: string }>`
-            SELECT delivery_id FROM scheduled_task_webhook_deliveries
-            WHERE delivery_id = ${deliveryId}
+          const claimed = yield* sql<{ relay_delivery_id: string }>`
+            INSERT INTO scheduled_task_webhook_relay_deliveries
+              (relay_delivery_id, task_id, seen_at)
+            VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
+            ON CONFLICT (relay_delivery_id) DO NOTHING
+            RETURNING relay_delivery_id
           `.pipe(
             Effect.mapError((cause) =>
-              taskError("Could not load webhook delivery.", { taskId: task.id, cause }),
+              taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
             ),
           );
-          if (seen.length > 0) return { _tag: "accepted" as const, deliveryId };
+          if (claimed.length === 0) return { _tag: "accepted" as const, deliveryId };
+          // Older claims can no longer be replayed by the relay.
+          yield* sql`
+            DELETE FROM scheduled_task_webhook_relay_deliveries
+            WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
+          `.pipe(Effect.ignore);
         }
         const log = (
           outcome: ScheduledTaskWebhookDeliveryOutcome,
@@ -1372,7 +1398,7 @@ export const layer = Layer.effect(
         const slot = yield* takeRateSlot(task.id, DateTime.toEpochMillis(now));
         if (slot !== "allowed") {
           if (slot === "first_rejected") yield* log("rate_limited");
-          return { _tag: "rate_limited" as const };
+          return yield* releaseClaim({ _tag: "rate_limited" as const });
         }
         if (!task.enabled) {
           yield* log("disabled");
@@ -1413,7 +1439,7 @@ export const layer = Layer.effect(
             ? ([false, counts] as const)
             : ([true, new Map(counts).set(queueKey, count + 1)] as const);
         });
-        if (!queued) return { _tag: "rate_limited" as const };
+        if (!queued) return yield* releaseClaim({ _tag: "rate_limited" as const });
         // Entries leave the map when their count reaches zero, so a deleted
         // task's key does not linger once its last delivery finishes.
         const release = Ref.update(webhookQueued, (counts) => {

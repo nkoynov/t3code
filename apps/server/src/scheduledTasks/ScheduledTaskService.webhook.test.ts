@@ -475,6 +475,45 @@ it.effect("a held request already delivered directly runs only once", () =>
   ),
 );
 
+it.effect("a held request runs once even after the log has trimmed it", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      const first = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "kept" }));
+      assert.equal(first._tag, "accepted");
+      yield* Queue.take(launches);
+      // Push the original row out of the 50-row delivery log.
+      const paused = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      yield* Effect.forEach(Array.from({ length: 55 }), () =>
+        service.triggerWebhook(requestFor(paused.task)),
+      );
+      yield* service.upsert(yield* webhookTaskInput());
+      const replay = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "kept" }));
+      assert.equal(replay._tag, "accepted");
+      assert.equal(yield* Queue.size(launches), 0);
+    }),
+  ),
+);
+
+it.effect("a rate-limited held request can run on a later pass", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      // Spend the task's 60-a-minute budget.
+      yield* Effect.forEach(Array.from({ length: 60 }), () =>
+        service.triggerWebhook(requestFor(task)),
+      );
+      const limited = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "later" }));
+      assert.equal(limited._tag, "rate_limited");
+      yield* service.upsert(yield* webhookTaskInput());
+      yield* TestClock.adjust("61 seconds");
+      const retried = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "later" }));
+      assert.equal(retried._tag, "accepted");
+      yield* Queue.take(launches);
+    }),
+  ),
+);
+
 it.effect("logs a held request at the time the relay received it", () =>
   withService(({ service }) =>
     Effect.gen(function* () {
