@@ -77,6 +77,32 @@ describe("webhook route", () => {
     }
   });
 
+  it("uses the relay's receive time only alongside its delivery id", async () => {
+    const received: Array<WebhookTriggerRequest> = [];
+    const { handler, dispose } = handlerFor((request) => {
+      received.push(request);
+      return Effect.succeed({
+        _tag: "accepted",
+        deliveryId: ScheduledTaskWebhookDeliveryId.make("delivery:1"),
+      });
+    });
+    try {
+      const receivedAt = "2026-10-04T10:00:00.000Z";
+      await handler(
+        post("/api/hooks/id/tok", "{}", {
+          "x-t3-relay-delivery-id": "relay-1",
+          "x-t3-relay-received-at": receivedAt,
+        }),
+      );
+      await handler(post("/api/hooks/id/tok", "{}", { "x-t3-relay-received-at": receivedAt }));
+      expect(received[0]?.relayDeliveryId).toBe("relay-1");
+      expect(received[0]?.receivedAt).toBe(receivedAt);
+      expect(received[1]?.receivedAt).toBeUndefined();
+    } finally {
+      await dispose();
+    }
+  });
+
   it("maps service outcomes to status codes", async () => {
     const cases: ReadonlyArray<[WebhookTriggerResult["_tag"], number]> = [
       ["not_found", 404],

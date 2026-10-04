@@ -36,6 +36,7 @@ const DROPPED_REQUEST_HEADERS = new Set([
   "x-real-ip",
   // Only the relay may set this; a sender could otherwise collide delivery ids.
   "x-t3-relay-delivery-id",
+  "x-t3-relay-received-at",
 ]);
 const DROPPED_REQUEST_HEADER_PREFIXES = ["proxy-", "cf-", "x-forwarded-"];
 
@@ -275,9 +276,11 @@ const make = Effect.gen(function* () {
     // timeout and is later delivered from the inbox runs only once.
     const hook = {
       id: yield* crypto.randomUUIDv4.pipe(Effect.orDie),
+      receivedAt,
       method: request.method,
       rawHookId: parsed.rawHookId,
       rawToken: parsed.rawToken,
+      hookKey: parsed.hookId,
       query: parsed.search.replace(/^\?/, ""),
       headers: forwardedHeaders(request.headers),
       body: body.success,
@@ -293,7 +296,7 @@ const make = Effect.gen(function* () {
           .hold({
             environmentId: parsed.environmentId,
             baseUrl: endpoint.httpBaseUrl,
-            hook: { ...hook, receivedAt },
+            hook,
           })
           .pipe(
             Effect.catch((cause) =>

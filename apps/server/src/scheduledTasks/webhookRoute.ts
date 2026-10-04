@@ -54,8 +54,10 @@ const handleWebhook =
         if (typeof value === "string") headers[name.toLowerCase()] = value;
       }
       const queryIndex = request.url.indexOf("?");
-      // Only the relay sets this; it strips any copy a sender supplied.
+      // Only the relay sets these; it strips any copy a sender supplied. The
+      // receive time matters for requests the relay held while we were offline.
       const relayDeliveryId = headers["x-t3-relay-delivery-id"];
+      const relayReceivedAt = relayDeliveryId ? headers["x-t3-relay-received-at"] : undefined;
 
       const result = yield* scheduledTasks
         .triggerWebhook({
@@ -68,6 +70,7 @@ const handleWebhook =
           body: body.value,
           bodyText: new TextDecoder().decode(body.value),
           ...(relayDeliveryId ? { relayDeliveryId } : {}),
+          ...(relayReceivedAt ? { receivedAt: relayReceivedAt } : {}),
         })
         .pipe(
           Effect.catch((cause) =>

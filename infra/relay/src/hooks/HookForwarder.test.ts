@@ -507,7 +507,7 @@ describe("HookForwarder", () => {
         });
         const body = new Uint8Array([0, 255, 10]);
         const response = yield* harness.send(
-          new Request(hookUrl("hook-1/tok%2Fen", "?a=1"), {
+          new Request(hookUrl("%68ook-1/tok%2Fen", "?a=1"), {
             method: "POST",
             body,
             headers: { "x-t3-relay-delivery-id": "forged", "x-sig": "s" },
@@ -520,6 +520,8 @@ describe("HookForwarder", () => {
         expect(hook?.query).toBe("a=1");
         expect([...(hook?.body ?? [])]).toEqual([0, 255, 10]);
         expect(hook?.headers["x-sig"]).toBe("s");
+        // Every spelling of the hook id shares one per-hook cap.
+        expect(hook?.hookKey).toBe("hook-1");
         // The sender cannot choose the delivery id.
         expect(hook?.headers["x-t3-relay-delivery-id"]).toBeUndefined();
         expect(hook?.id).not.toBe("forged");

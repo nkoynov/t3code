@@ -33,6 +33,8 @@ export interface HeldHook {
   /** Path segments exactly as the sender sent them; the environment decodes them. */
   readonly rawHookId: string;
   readonly rawToken: string;
+  /** The decoded hook id, so every spelling of one hook shares its cap. */
+  readonly hookKey: string;
   /** Without the leading `?`. */
   readonly query: string;
   readonly headers: Readonly<Record<string, string>>;
@@ -56,6 +58,7 @@ interface HeldHookRow {
   readonly method: string;
   readonly raw_hook_id: string;
   readonly raw_token: string;
+  readonly hook_key: string;
   readonly query: string;
   readonly headers: string;
   readonly body: Uint8Array;
@@ -78,12 +81,13 @@ export const migrate = Effect.gen(function* () {
       method TEXT NOT NULL,
       raw_hook_id TEXT NOT NULL,
       raw_token TEXT NOT NULL,
+      hook_key TEXT NOT NULL,
       query TEXT NOT NULL,
       headers TEXT NOT NULL,
       body BLOB NOT NULL
     )
   `;
-  yield* sql`CREATE INDEX IF NOT EXISTS held_hooks_hook ON held_hooks (raw_hook_id)`;
+  yield* sql`CREATE INDEX IF NOT EXISTS held_hooks_hook ON held_hooks (hook_key)`;
   // Where to push, and how many attempts in a row have failed. One row.
   yield* sql`
     CREATE TABLE IF NOT EXISTS held_hooks_target (
@@ -134,11 +138,12 @@ export const hold = Effect.fn("HookInboxStore.hold")(function* (hook: HeldHook, 
   const sql = yield* SqlClient.SqlClient;
   // One statement, so the caps hold however many requests arrive at once.
   const inserted = yield* sql<{ readonly id: string }>`
-    INSERT INTO held_hooks (id, received_at, method, raw_hook_id, raw_token, query, headers, body)
+    INSERT INTO held_hooks
+      (id, received_at, method, raw_hook_id, raw_token, hook_key, query, headers, body)
     SELECT ${hook.id}, ${hook.receivedAt}, ${hook.method}, ${hook.rawHookId}, ${hook.rawToken},
-      ${hook.query}, ${encodeHeaders(hook.headers)}, ${hook.body}
+      ${hook.hookKey}, ${hook.query}, ${encodeHeaders(hook.headers)}, ${hook.body}
     WHERE (SELECT count(*) FROM held_hooks) < ${HOOK_INBOX_MAX_REQUESTS}
-      AND (SELECT count(*) FROM held_hooks WHERE raw_hook_id = ${hook.rawHookId})
+      AND (SELECT count(*) FROM held_hooks WHERE hook_key = ${hook.hookKey})
         < ${HOOK_INBOX_MAX_PER_HOOK}
       AND (SELECT coalesce(sum(length(body)), 0) FROM held_hooks) + ${hook.body.byteLength}
         <= ${HOOK_INBOX_MAX_BYTES}
@@ -180,7 +185,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   yield* sql`DELETE FROM held_hooks WHERE received_at < ${iso(startedAt - HOOK_INBOX_TTL_MS)}`;
   const target = yield* readTarget;
   const batch = yield* sql<HeldHookRow>`
-    SELECT id, received_at, method, raw_hook_id, raw_token, query, headers, body
+    SELECT id, received_at, method, raw_hook_id, raw_token, hook_key, query, headers, body
     FROM held_hooks ORDER BY seq LIMIT ${DELIVERIES_PER_RUN}
   `;
   if (batch.length === 0 || target === null) {
@@ -196,6 +201,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
       method: row.method,
       rawHookId: row.raw_hook_id,
       rawToken: row.raw_token,
+      hookKey: row.hook_key,
       query: row.query,
       headers: decodeHeaders(row.headers),
       body: row.body,

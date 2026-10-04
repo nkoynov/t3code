@@ -16,6 +16,7 @@ const hook = (id: string, overrides: Partial<HookInboxStore.HeldHook> = {}) =>
     receivedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
     method: "POST",
     rawHookId: "hook-1",
+    hookKey: "hook-1",
     rawToken: "tok%2Fen",
     query: "a=1",
     headers: { "content-type": "application/json", "x-sig": "s" },
@@ -123,7 +124,7 @@ describe("HookInboxStore", () => {
         }
         expect(yield* HookInboxStore.hold(yield* hook("one-too-many"), BASE_URL)).toBeNull();
         // Another hook still has room.
-        const other = yield* hook("other", { rawHookId: "hook-2" });
+        const other = yield* hook("other", { rawHookId: "hook-2", hookKey: "hook-2" });
         expect(yield* HookInboxStore.hold(other, BASE_URL)).not.toBeNull();
       }),
     ),
@@ -139,7 +140,7 @@ describe("HookInboxStore", () => {
         const small = new Uint8Array(11);
         expect(
           yield* HookInboxStore.hold(
-            yield* hook("small", { rawHookId: "x", body: small }),
+            yield* hook("small", { rawHookId: "x", hookKey: "x", body: small }),
             BASE_URL,
           ),
         ).toBeNull();
