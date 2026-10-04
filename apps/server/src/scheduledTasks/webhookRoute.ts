@@ -54,6 +54,8 @@ const handleWebhook =
         if (typeof value === "string") headers[name.toLowerCase()] = value;
       }
       const queryIndex = request.url.indexOf("?");
+      // Only the relay sets this; it strips any copy a sender supplied.
+      const relayDeliveryId = headers["x-t3-relay-delivery-id"];
 
       const result = yield* scheduledTasks
         .triggerWebhook({
@@ -65,6 +67,7 @@ const handleWebhook =
           headers,
           body: body.value,
           bodyText: new TextDecoder().decode(body.value),
+          ...(relayDeliveryId ? { relayDeliveryId } : {}),
         })
         .pipe(
           Effect.catch((cause) =>
@@ -87,6 +90,8 @@ const handleWebhook =
           return json(409, { error: "hook_disabled" });
         case "rate_limited":
           return json(429, { error: "rate_limited" });
+        case "expired":
+          return json(410, { error: "delivery_too_old" });
         case "error":
           return json(500, { error: "internal_error" });
       }

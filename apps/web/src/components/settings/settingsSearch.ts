@@ -830,6 +830,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     cloudOnly: true,
   },
   {
+    id: "hold-webhooks-while-offline",
+    localEnvironmentOnly: true,
+    title: "Hold webhooks while offline",
+    to: "/settings/connections",
+    targetId: "connections-environment",
+    searchTerms: ["webhook automations offline queue mailbox t3 connect"],
+    cloudOnly: true,
+  },
+  {
     id: "publish-agent-activity",
     localEnvironmentOnly: true,
     title: "Publish agent activity",

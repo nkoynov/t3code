@@ -83,6 +83,10 @@ export interface WebhookTriggerRequest extends WebhookRequest {
   readonly hookId: string;
   readonly token: string;
   readonly body: Uint8Array;
+  /** Set by T3 Connect; the same id is never dispatched twice. */
+  readonly relayDeliveryId?: string;
+  /** When the relay received a held request; defaults to now. */
+  readonly receivedAt?: string;
 }
 
 /** What the HTTP route should answer. `not_found` covers unknown hooks and wrong tokens alike. */
@@ -91,7 +95,8 @@ export type WebhookTriggerResult =
   | { readonly _tag: "not_found" }
   | { readonly _tag: "rejected_signature" }
   | { readonly _tag: "disabled" }
-  | { readonly _tag: "rate_limited" };
+  | { readonly _tag: "rate_limited" }
+  | { readonly _tag: "expired" };
 
 const decodeTask = Schema.decodeUnknownEffect(ScheduledTask);
 const decodeTaskId = Schema.decodeUnknownOption(ScheduledTaskId);
@@ -985,6 +990,7 @@ export const layer = Layer.effect(
                         encoding: input.schedule.signature.encoding,
                         prefix: input.schedule.signature.prefix,
                       },
+                maxDeliveryAgeMinutes: input.schedule.maxDeliveryAgeMinutes ?? null,
               }
             : input.schedule;
         const webhook =
@@ -1317,11 +1323,31 @@ export const layer = Layer.effect(
         const task = yield* decodeRow(row);
         if (task.schedule.type !== "webhook") return { _tag: "not_found" as const };
 
-        const receivedAt = yield* localNow;
-        const deliveryUuid = yield* crypto.randomUUIDv4.pipe(
-          Effect.mapError((cause) => taskError("Could not generate delivery id.", { cause })),
+        const now = yield* localNow;
+        const receivedAt =
+          request.receivedAt === undefined
+            ? now
+            : Option.getOrElse(DateTime.make(request.receivedAt), () => now);
+        const deliveryId = ScheduledTaskWebhookDeliveryId.make(
+          request.relayDeliveryId === undefined
+            ? `delivery:${yield* crypto.randomUUIDv4.pipe(
+                Effect.mapError((cause) => taskError("Could not generate delivery id.", { cause })),
+              )}`
+            : `delivery:relay:${request.relayDeliveryId}`,
         );
-        const deliveryId = ScheduledTaskWebhookDeliveryId.make(`delivery:${deliveryUuid}`);
+        // A held request may already have reached this environment directly
+        // before a timeout; it runs once.
+        if (request.relayDeliveryId !== undefined) {
+          const seen = yield* sql<{ delivery_id: string }>`
+            SELECT delivery_id FROM scheduled_task_webhook_deliveries
+            WHERE delivery_id = ${deliveryId}
+          `.pipe(
+            Effect.mapError((cause) =>
+              taskError("Could not load webhook delivery.", { taskId: task.id, cause }),
+            ),
+          );
+          if (seen.length > 0) return { _tag: "accepted" as const, deliveryId };
+        }
         const log = (
           outcome: ScheduledTaskWebhookDeliveryOutcome,
           details: {
@@ -1343,7 +1369,7 @@ export const layer = Layer.effect(
 
         // Only the first rejected request in a window is logged, so a flood
         // cannot write rows or push the real deliveries out of the log.
-        const slot = yield* takeRateSlot(task.id, DateTime.toEpochMillis(receivedAt));
+        const slot = yield* takeRateSlot(task.id, DateTime.toEpochMillis(now));
         if (slot !== "allowed") {
           if (slot === "first_rejected") yield* log("rate_limited");
           return { _tag: "rate_limited" as const };
@@ -1366,6 +1392,14 @@ export const layer = Layer.effect(
             yield* log("rejected_signature");
             return { _tag: "rejected_signature" as const };
           }
+        }
+        const maxAgeMinutes = task.schedule.maxDeliveryAgeMinutes ?? null;
+        if (
+          maxAgeMinutes !== null &&
+          DateTime.toEpochMillis(now) - DateTime.toEpochMillis(receivedAt) > maxAgeMinutes * 60_000
+        ) {
+          yield* log("expired", { signatureVerified: signature !== null });
+          return { _tag: "expired" as const };
         }
 
         const rendered = renderWebhookPrompt(task.prompt, request);

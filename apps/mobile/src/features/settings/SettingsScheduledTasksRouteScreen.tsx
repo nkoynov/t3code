@@ -909,13 +909,26 @@ function TaskForm({
             />
           </>
         ) : draft.schedule.mode === "webhook" ? (
-          <WebhookScheduleDetails
-            environmentId={environmentId}
-            task={
-              tasks.data?.tasks.find((task) => task.id === draft.task?.id) ?? draft.task ?? null
-            }
-            signatureConfigured={draft.schedule.signature !== null}
-          />
+          <>
+            <WebhookScheduleDetails
+              environmentId={environmentId}
+              task={
+                tasks.data?.tasks.find((task) => task.id === draft.task?.id) ?? draft.task ?? null
+              }
+              signatureConfigured={draft.schedule.signature !== null}
+            />
+            <FormField
+              label="Skip requests older than (minutes)"
+              value={draft.schedule.maxDeliveryAgeMinutes}
+              placeholder="Run every request"
+              keyboardType="decimal-pad"
+              disabled={saving}
+              borderTop
+              onChange={(maxDeliveryAgeMinutes) =>
+                setDraft({ ...draft, schedule: { ...draft.schedule, maxDeliveryAgeMinutes } })
+              }
+            />
+          </>
         ) : (
           <>
             <FormField

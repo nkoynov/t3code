@@ -24,6 +24,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import {
+  MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   MIN_SCHEDULED_TASK_INTERVAL_MS,
   ProviderInstanceId,
   resolveEnvironmentMachineKind,
@@ -130,6 +131,7 @@ const EMPTY_DRAFT: DraftState = {
   signatureEnabled: false,
   ...WEBHOOK_SIGNATURE_DEFAULTS,
   signatureSecret: "",
+  maxDeliveryAgeMinutes: "",
 };
 
 /** Labelled field: a caption sitting above its control. */
@@ -211,11 +213,14 @@ const DELIVERY_OUTCOME_LABELS: Record<ScheduledTaskWebhookDeliveryOutcome, strin
   rejected_signature: "Bad signature",
   disabled: "Task paused",
   rate_limited: "Rate limited",
+  expired: "Too old",
 };
 
 function deliveryOutcomeVariant(outcome: ScheduledTaskWebhookDeliveryOutcome) {
   if (outcome === "accepted") return "success";
-  if (outcome === "disabled" || outcome === "rate_limited") return "warning";
+  if (outcome === "disabled" || outcome === "rate_limited" || outcome === "expired") {
+    return "warning";
+  }
   return "error";
 }
 
@@ -1131,6 +1136,27 @@ function ScheduledTaskEditorDialog({
                       "Each request runs the prompt. Use {{body.path}}, {{headers.name}}, {{query.name}}, {{body}} or {{request}} in the prompt; only what it names reaches the agent."
                     }
                   </p>
+                  <Field
+                    label="Skip requests older than"
+                    hint="minutes, optional"
+                    htmlFor="scheduled-task-max-age"
+                  >
+                    <Input
+                      id="scheduled-task-max-age"
+                      type="number"
+                      nativeInput
+                      min={1}
+                      max={MAX_WEBHOOK_DELIVERY_AGE_MINUTES}
+                      placeholder="Run every request"
+                      value={draft.maxDeliveryAgeMinutes}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          maxDeliveryAgeMinutes: event.target.value,
+                        }))
+                      }
+                    />
+                  </Field>
                   <div className="flex items-center justify-between gap-4">
                     <div className="min-w-0 space-y-1">
                       <Label htmlFor="scheduled-task-signature">Require signature</Label>

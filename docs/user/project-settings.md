@@ -84,9 +84,16 @@ same secret in the repository's webhook settings with content type
 `application/json`. Requests without a valid signature are rejected.
 
 On desktop and web, pick **Deliveries** from a task's menu to see recent
-requests and the prompt each one produced. If the environment is offline, the sender gets an error and
-nothing runs; redeliver from the sender, such as GitHub's **Recent Deliveries**,
-once it is back.
+requests and the prompt each one produced.
+
+If the environment is offline, the sender gets an error and nothing runs;
+redeliver from the sender, such as GitHub's **Recent Deliveries**, once it is
+back. To have T3 Connect keep requests instead, turn on **Hold webhooks while
+offline** in **Settings → Connections**. T3 Connect then stores requests to a
+T3 Connect URL for up to 24 hours and delivers them when the environment
+returns. Leave it off if you don't want request bodies stored outside your
+machine. To skip requests that waited too long, set **Skip requests older
+than** on the task.
 
 ## Defaults and inheritance
 

@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -168,6 +169,7 @@ it.effect("checks the configured signature and keeps the secret write-only", () 
       assert.deepEqual(task.schedule, {
         type: "webhook",
         signature: { header: "x-hub-signature-256", encoding: "hex", prefix: "sha256=" },
+        maxDeliveryAgeMinutes: null,
       });
       assert.isTrue(task.webhook?.hasSecret);
 
@@ -450,6 +452,80 @@ it.effect("logs a body's first 64 KiB by bytes, not characters", () =>
       });
       assert.isTrue(delivery.bodyTruncated);
       assert.isAtMost(new TextEncoder().encode(delivery.body).byteLength, 64 * 1024 + 3);
+    }),
+  ),
+);
+
+it.effect("a held request already delivered directly runs only once", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      const direct = yield* service.triggerWebhook(
+        requestFor(task, { relayDeliveryId: "relay-1" }),
+      );
+      const replayed = yield* service.triggerWebhook(
+        requestFor(task, { relayDeliveryId: "relay-1", receivedAt: "2026-10-04T10:00:00.000Z" }),
+      );
+      assert.equal(direct._tag, "accepted");
+      assert.deepEqual(replayed, direct);
+      yield* Queue.take(launches);
+      const logged = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      assert.equal(logged.length, 1);
+    }),
+  ),
+);
+
+it.effect("logs a held request at the time the relay received it", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
+      yield* service.triggerWebhook(
+        requestFor(task, { relayDeliveryId: "relay-2", receivedAt: "2026-10-04T10:00:00.000Z" }),
+      );
+      const [delivery] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      assert.equal(delivery?.receivedAt, "2026-10-04T10:00:00.000Z");
+    }),
+  ),
+);
+
+it.effect("skips a held request older than the task's max age", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({ schedule: { type: "webhook", maxDeliveryAgeMinutes: 30 } }),
+      );
+      const now = yield* DateTime.now;
+      const old = DateTime.formatIso(DateTime.subtract(now, { minutes: 31 }));
+      const fresh = DateTime.formatIso(DateTime.subtract(now, { minutes: 5 }));
+      const tooOld = yield* service.triggerWebhook(
+        requestFor(task, { relayDeliveryId: "old", receivedAt: old }),
+      );
+      assert.equal(tooOld._tag, "expired");
+      assert.equal(yield* Queue.size(launches), 0);
+      const ok = yield* service.triggerWebhook(
+        requestFor(task, { relayDeliveryId: "fresh", receivedAt: fresh }),
+      );
+      assert.equal(ok._tag, "accepted");
+      const outcomes = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries.map(
+        (delivery) => delivery.outcome,
+      );
+      assert.includeMembers(outcomes, ["expired", "accepted"]);
+    }),
+  ),
+);
+
+it.effect("runs a held request of any age when no max age is set", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      const now = yield* DateTime.now;
+      const result = yield* service.triggerWebhook(
+        requestFor(task, {
+          relayDeliveryId: "ancient",
+          receivedAt: DateTime.formatIso(DateTime.subtract(now, { hours: 23 })),
+        }),
+      );
+      assert.equal(result._tag, "accepted");
     }),
   ),
 );

@@ -79,6 +79,8 @@ export interface DraftState {
   readonly signaturePrefix: string;
   /** Write-only: empty keeps the secret already stored on the server. */
   readonly signatureSecret: string;
+  /** Minutes as typed; empty runs every held request regardless of age. */
+  readonly maxDeliveryAgeMinutes: string;
 }
 
 /** GitHub's signature settings, the most common sender. */
@@ -90,6 +92,12 @@ export const WEBHOOK_SIGNATURE_DEFAULTS = {
 
 /** Prompt a new webhook task starts with: the whole request, which the user can narrow down. */
 export const DEFAULT_WEBHOOK_PROMPT = "Handle this webhook:\n{{request}}";
+
+/** Blank or invalid input means "no limit"; the server rejects values past the relay's TTL. */
+function parseMaxDeliveryAge(value: string): number | null {
+  const minutes = Number(value.trim());
+  return value.trim() !== "" && Number.isInteger(minutes) && minutes > 0 ? minutes : null;
+}
 
 export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule {
   if (draft.scheduleMode === "webhook") {
@@ -104,6 +112,7 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
             ...(secret ? { secret } : {}),
           }
         : null,
+      maxDeliveryAgeMinutes: parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes),
     };
   }
   if (draft.scheduleMode === "interval") {
@@ -169,6 +178,10 @@ export function taskToDraft(task: ScheduledTask): DraftState {
         }
       : { signatureEnabled: false, ...WEBHOOK_SIGNATURE_DEFAULTS }),
     signatureSecret: "",
+    maxDeliveryAgeMinutes:
+      schedule.type === "webhook" && schedule.maxDeliveryAgeMinutes != null
+        ? String(schedule.maxDeliveryAgeMinutes)
+        : "",
   };
 }
 

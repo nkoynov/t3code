@@ -119,6 +119,8 @@ import { authHttpApiLayer, environmentAuthenticatedAuthLayer } from "./auth/http
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import { webhookHttpApiLayer } from "./scheduledTasks/webhookRoute.ts";
+import * as HookMailboxDrain from "./relay/HookMailboxDrain.ts";
+import * as Scheduler from "./scheduling/Scheduler.ts";
 import { ScheduledTaskWebhookOrigin } from "./scheduledTasks/ScheduledTaskService.ts";
 import { CLOUD_ENDPOINT_RUNTIME_CONFIG, RELAY_URL_SECRET } from "./cloud/config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
@@ -535,8 +537,15 @@ const ProviderInstallationRefreshLive = Layer.effectDiscard(
   }),
 );
 
+// Delivers webhook requests T3 Connect held while this environment was offline.
+const HookMailboxDrainLive = HookMailboxDrain.layer.pipe(
+  Layer.provide(HookMailboxDrain.relayLayer),
+  Layer.provide(Scheduler.layer),
+);
+
 const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
   AgentAwarenessRelay.layer,
+  HookMailboxDrainLive,
   ThreadSettlementWorkerLive,
   Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
     Layer.provide(ProjectionStoreV2.layer),

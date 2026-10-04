@@ -44,6 +44,8 @@ export type ScheduleDraft = {
   readonly intervalMinutes: string;
   /** A webhook signature check configured elsewhere; mobile keeps it but does not edit it. */
   readonly signature: ScheduledTaskWebhookSignature | null;
+  /** Minutes as typed; empty runs every held request regardless of age. */
+  readonly maxDeliveryAgeMinutes: string;
 };
 
 export const DEFAULT_SCHEDULE: ScheduleDraft = {
@@ -52,6 +54,7 @@ export const DEFAULT_SCHEDULE: ScheduleDraft = {
   weekdays: [1, 2, 3, 4, 5],
   intervalMinutes: "15",
   signature: null,
+  maxDeliveryAgeMinutes: "",
 };
 
 /** Prompt a new webhook task starts with: the whole request, which the user can narrow down. */
@@ -74,8 +77,22 @@ export function scheduleDraftForTask(task: Pick<ScheduledTask, "schedule">): Sch
         intervalMinutes: String(Math.max(1, task.schedule.everyMs / 60_000)),
       };
     case "webhook":
-      return { ...DEFAULT_SCHEDULE, mode: "webhook", signature: task.schedule.signature };
+      return {
+        ...DEFAULT_SCHEDULE,
+        mode: "webhook",
+        signature: task.schedule.signature,
+        maxDeliveryAgeMinutes:
+          task.schedule.maxDeliveryAgeMinutes == null
+            ? ""
+            : String(task.schedule.maxDeliveryAgeMinutes),
+      };
   }
+}
+
+/** Blank or invalid input means "no limit"; the server rejects values past the relay's TTL. */
+function parseMaxDeliveryAge(value: string): number | null {
+  const minutes = Number(value.trim());
+  return value.trim() !== "" && Number.isInteger(minutes) && minutes > 0 ? minutes : null;
 }
 
 export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSchedule | null {
@@ -91,6 +108,7 @@ export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSche
               encoding: draft.signature.encoding,
               prefix: draft.signature.prefix,
             },
+      maxDeliveryAgeMinutes: parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes),
     };
   }
   if (draft.mode === "interval") {
@@ -145,6 +163,7 @@ function draftSignature(draft: ScheduledTaskDraft): string {
     draft.schedule.timeOfDay,
     [...draft.schedule.weekdays].sort((a, b) => a - b),
     draft.schedule.intervalMinutes,
+    draft.schedule.maxDeliveryAgeMinutes,
     draft.workspace,
     draft.baseRef,
     draft.checkoutPath,
