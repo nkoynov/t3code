@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import { RelayApi } from "@t3tools/contracts/relay";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -357,6 +358,25 @@ describe("HookForwarder", () => {
       const response = yield* Fiber.join(fiber);
       expect(response.status).toBe(504);
       expect(yield* readJson(response)).toEqual({ error: "environment_timeout" });
+    }),
+  );
+
+  it.effect("holds a timed-out request with the time it arrived", () =>
+    Effect.gen(function* () {
+      const reachedUpstream = yield* Deferred.make<void>();
+      const harness = makeHarness({
+        links: [{ ...managedLink, holdWebhooksWhileOffline: true }],
+        execute: () =>
+          Deferred.succeed(reachedUpstream, undefined).pipe(Effect.andThen(Effect.never)),
+      });
+      const arrivedAt = DateTime.formatIso(yield* DateTime.now);
+      const fiber = yield* harness
+        .send(new Request(hookUrl(), { method: "POST", body: "{}" }))
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(reachedUpstream);
+      yield* TestClock.adjust(Duration.millis(RELAY_HOOK_UPSTREAM_TIMEOUT_MS));
+      expect((yield* Fiber.join(fiber)).status).toBe(202);
+      expect(harness.held[0]?.receivedAt).toBe(arrivedAt);
     }),
   );
 

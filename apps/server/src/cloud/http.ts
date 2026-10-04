@@ -89,6 +89,7 @@ import {
   encodeConfirmedOriginJson,
   PUBLISH_AGENT_ACTIVITY_SECRET,
   HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
+  readHoldWebhooksWhileOffline,
   readRelayConnection,
   RELAY_ENVIRONMENT_CREDENTIAL_SECRET,
   RELAY_ISSUER_SECRET,
@@ -1386,12 +1387,22 @@ const cloudPreferencesHandler = Effect.fn("environment.cloud.preferences")(
     yield* requireEnvironmentScope(AuthRelayWriteScope);
     if (payload.holdWebhooksWhileOffline !== undefined) {
       // The relay decides whether to hold a request, so it is told first; the
-      // local copy is only saved once the relay has the same value.
+      // local copy is only saved once the relay has the same value, and the
+      // relay is put back if that save fails.
+      const previous = yield* readHoldWebhooksWhileOffline(dependencies.secrets);
       yield* pushHoldWebhooksWhileOffline(dependencies, payload.holdWebhooksWhileOffline);
-      yield* dependencies.secrets.set(
-        HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
-        stringToBytes(String(payload.holdWebhooksWhileOffline)),
-      );
+      yield* dependencies.secrets
+        .set(
+          HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET,
+          stringToBytes(String(payload.holdWebhooksWhileOffline)),
+        )
+        .pipe(
+          Effect.tapError(() =>
+            previous === payload.holdWebhooksWhileOffline
+              ? Effect.void
+              : pushHoldWebhooksWhileOffline(dependencies, previous).pipe(Effect.ignore),
+          ),
+        );
     }
     yield* dependencies.secrets.set(
       PUBLISH_AGENT_ACTIVITY_SECRET,

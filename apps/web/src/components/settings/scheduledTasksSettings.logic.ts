@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
@@ -94,9 +95,13 @@ export const WEBHOOK_SIGNATURE_DEFAULTS = {
 export const DEFAULT_WEBHOOK_PROMPT = "Handle this webhook:\n{{request}}";
 
 /** Blank or invalid input means "no limit"; the server rejects values past the relay's TTL. */
-function parseMaxDeliveryAge(value: string): number | null {
+/** Blank means "no limit"; undefined means the input is not a valid limit. */
+export function parseMaxDeliveryAge(value: string): number | null | undefined {
+  if (value.trim() === "") return null;
   const minutes = Number(value.trim());
-  return value.trim() !== "" && Number.isInteger(minutes) && minutes > 0 ? minutes : null;
+  return Number.isInteger(minutes) && minutes > 0 && minutes <= MAX_WEBHOOK_DELIVERY_AGE_MINUTES
+    ? minutes
+    : undefined;
 }
 
 export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule {
@@ -112,7 +117,7 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
             ...(secret ? { secret } : {}),
           }
         : null,
-      maxDeliveryAgeMinutes: parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes),
+      maxDeliveryAgeMinutes: parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes) ?? null,
     };
   }
   if (draft.scheduleMode === "interval") {

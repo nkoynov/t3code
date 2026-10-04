@@ -219,6 +219,8 @@ const make = Effect.gen(function* () {
     request: HttpServerRequest.HttpServerRequest,
   ) {
     const outcome = (value: string) => Effect.annotateCurrentSpan({ "relay.hook.outcome": value });
+    // When the sender called, not when the environment failed to answer.
+    const receivedAt = DateTime.formatIso(yield* DateTime.now);
     const parsed = parseHookPath(request.url);
     if (!parsed) {
       yield* outcome("invalid_path");
@@ -291,7 +293,7 @@ const make = Effect.gen(function* () {
           .hold({
             environmentId: parsed.environmentId,
             baseUrl: endpoint.httpBaseUrl,
-            hook: { ...hook, receivedAt: DateTime.formatIso(yield* DateTime.now) },
+            hook: { ...hook, receivedAt },
           })
           .pipe(
             Effect.catch((cause) =>

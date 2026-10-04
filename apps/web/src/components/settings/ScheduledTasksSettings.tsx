@@ -60,6 +60,7 @@ import {
   DEFAULT_WEBHOOK_PROMPT,
   WEBHOOK_SIGNATURE_DEFAULTS,
   matchesScheduledTaskScope,
+  parseMaxDeliveryAge,
   scheduleFromDraft,
   scheduledTaskDefaultModel,
   taskToDraft,
@@ -837,6 +838,16 @@ function ScheduledTaskEditorDialog({
       selection === null
     ) {
       reportFailure("Scheduled task is incomplete", "Add a title, prompt, project, and model.");
+      return;
+    }
+    if (
+      draft.scheduleMode === "webhook" &&
+      parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes) === undefined
+    ) {
+      reportFailure(
+        "Invalid age limit",
+        `Enter whole minutes from 1 to ${MAX_WEBHOOK_DELIVERY_AGE_MINUTES}, or leave it blank.`,
+      );
       return;
     }
     const schedule = scheduleFromDraft(draft);

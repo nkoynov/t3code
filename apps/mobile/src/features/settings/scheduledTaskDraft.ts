@@ -8,7 +8,7 @@ import type {
   ScheduledTaskWebhookSignature,
 } from "@t3tools/contracts";
 
-import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, MAX_WEBHOOK_DELIVERY_AGE_MINUTES } from "@t3tools/contracts";
 import {
   resolveProjectSettings,
   type LegacyProjectSettingsFields,
@@ -89,14 +89,19 @@ export function scheduleDraftForTask(task: Pick<ScheduledTask, "schedule">): Sch
   }
 }
 
-/** Blank or invalid input means "no limit"; the server rejects values past the relay's TTL. */
-function parseMaxDeliveryAge(value: string): number | null {
+/** Blank means "no limit"; undefined means the input is not a valid limit. */
+function parseMaxDeliveryAge(value: string): number | null | undefined {
+  if (value.trim() === "") return null;
   const minutes = Number(value.trim());
-  return value.trim() !== "" && Number.isInteger(minutes) && minutes > 0 ? minutes : null;
+  return Number.isInteger(minutes) && minutes > 0 && minutes <= MAX_WEBHOOK_DELIVERY_AGE_MINUTES
+    ? minutes
+    : undefined;
 }
 
 export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSchedule | null {
   if (draft.mode === "webhook") {
+    const maxDeliveryAgeMinutes = parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes);
+    if (maxDeliveryAgeMinutes === undefined) return null;
     // No secret is sent, so the server keeps the stored one.
     return {
       type: "webhook",
@@ -108,7 +113,7 @@ export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSche
               encoding: draft.signature.encoding,
               prefix: draft.signature.prefix,
             },
-      maxDeliveryAgeMinutes: parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes),
+      maxDeliveryAgeMinutes,
     };
   }
   if (draft.mode === "interval") {
