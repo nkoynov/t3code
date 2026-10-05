@@ -1574,7 +1574,7 @@ const make = Effect.gen(function* () {
           Effect.onInterrupt(() => closeCard),
         );
         if (Option.isNone(answered)) yield* closeCard;
-        // A save that raced the timeout still wins: the card is answered once.
+        // An answer that raced the timeout still wins: the card is answered once.
         const status = Option.isSome(answered)
           ? answered.value
           : yield* threadManagement
@@ -1585,8 +1585,9 @@ const make = Effect.gen(function* () {
               .pipe(
                 Effect.map((records) => {
                   const item = records.turnItems.find((candidate) => candidate.id === turnItemId);
-                  return item?.type === "secret_request" && item.secretStatus === "saved"
-                    ? ("saved" as const)
+                  return item?.type === "secret_request" &&
+                    (item.secretStatus === "saved" || item.secretStatus === "declined")
+                    ? item.secretStatus
                     : ("timed_out" as const);
                 }),
                 Effect.orElseSucceed(() => "timed_out" as const),
