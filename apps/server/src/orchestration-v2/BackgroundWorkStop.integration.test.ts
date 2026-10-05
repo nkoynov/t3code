@@ -39,12 +39,17 @@ const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "test-model" };
 
 // Codex turns leave commands running, then the thread moves to another
-// provider thread (a provider switch). Stop on the newer, settled run must
-// reach both provider threads and end all of the Codex work.
-const stopEarlierBackgroundWork = (
-  failedStart: boolean,
-  stopWithQueue?: "thread.stop" | "run.interrupt",
-) =>
+// provider thread (a provider switch). Stop must end all of the Codex work,
+// including when it selects an older resumed run on the other provider thread.
+const stopEarlierBackgroundWork = ({
+  failedStart = false,
+  stopWithQueue,
+  olderStart = false,
+}: {
+  readonly failedStart?: boolean;
+  readonly stopWithQueue?: "thread.stop" | "run.interrupt";
+  readonly olderStart?: boolean;
+}) =>
   Effect.scoped(
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace("background-work-stop");
@@ -380,10 +385,11 @@ const stopEarlierBackgroundWork = (
         // the thread moves on to another provider thread, which also has a
         // live session.
         const watcherId = TurnItemId.make("turn-item:watcher");
+        const otherProviderThreadId = ProviderThreadId.make("provider-thread:other");
         const watcherRun = settledRun({
           ordinal: 2,
-          providerThreadId: codexProviderThread.id,
-          runningItem: { id: watcherId, kind: "command" },
+          providerThreadId: olderStart ? otherProviderThreadId : codexProviderThread.id,
+          ...(olderStart ? {} : { runningItem: { id: watcherId, kind: "command" as const } }),
         });
         const reviewerId = TurnItemId.make("turn-item:reviewer");
         const reviewerRun = settledRun({
@@ -391,7 +397,6 @@ const stopEarlierBackgroundWork = (
           providerThreadId: codexProviderThread.id,
           runningItem: { id: reviewerId, kind: "subagent" },
         });
-        const otherProviderThreadId = ProviderThreadId.make("provider-thread:other");
         const latestRun = settledRun({ ordinal: 4, providerThreadId: otherProviderThreadId });
         yield* sink.write({
           events: [
@@ -495,6 +500,25 @@ const stopEarlierBackgroundWork = (
           });
         }
 
+        if (olderStart) {
+          const older = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (run) => run.id === watcherRun.runId,
+          )!;
+          // A resumed queue can start a lower-ordinal run after later runs have ended.
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("older-run-starting"),
+                type: "run.updated",
+                threadId,
+                runId: older.id,
+                occurredAt: now,
+                payload: { ...older, status: "starting", startedAt: null, completedAt: null },
+              },
+            ],
+          });
+        }
+
         yield* orchestrator.dispatch(
           stopWithQueue === "thread.stop"
             ? {
@@ -506,33 +530,44 @@ const stopEarlierBackgroundWork = (
                 type: "run.interrupt",
                 commandId: CommandId.make("stop-background-work"),
                 threadId,
-                runId: failedStart ? failedRun.runId : latestRun.runId,
+                runId: olderStart
+                  ? watcherRun.runId
+                  : failedStart
+                    ? failedRun.runId
+                    : latestRun.runId,
                 ...(stopWithQueue === undefined ? {} : { holdQueue: true }),
               },
         );
         yield* worker.drain();
 
-        // Stop reaches both provider threads. The Codex one is interrupted at
-        // its latest pending work, the subagent's parent turn, so its settle
-        // covers all three Codex runs.
+        // The Codex interrupt targets its latest pending work, the subagent's parent turn,
+        // so its settlement covers the Codex background work.
         assert.sameDeepMembers(
           interrupts.map((interrupt) => [interrupt.providerThread.id, interrupt.providerTurnId]),
           [
-            [otherProviderThreadId, latestRun.providerTurnId],
+            ...(olderStart ? [] : [[otherProviderThreadId, latestRun.providerTurnId]]),
             [codexProviderThread.id, reviewerRun.providerTurnId],
           ],
         );
         const after = yield* orchestrator.getThreadProjection(threadId);
+        if (olderStart) {
+          assert.equal(
+            after.runs.find((run) => run.id === watcherRun.runId)?.status,
+            "interrupted",
+          );
+        }
         if (stopWithQueue !== undefined) {
           assert.equal(after.runs.at(-1)?.status, "queued");
           assert.equal(after.runs.at(-1)?.queueHeld, true);
           assert.lengthOf(started, 1);
         }
         assert.deepEqual(
-          [devServerId, watcherId, reviewerId].map(
+          [devServerId, ...(olderStart ? [] : [watcherId]), reviewerId].map(
             (id) => after.turnItems.find((item) => item.id === id)?.status,
           ),
-          ["interrupted", "interrupted", "interrupted"],
+          olderStart
+            ? ["interrupted", "interrupted"]
+            : ["interrupted", "interrupted", "interrupted"],
         );
       }).pipe(
         Effect.provide(
@@ -547,15 +582,20 @@ const stopEarlierBackgroundWork = (
   );
 
 it.effect("Stop reaches background work an earlier provider thread still runs", () =>
-  stopEarlierBackgroundWork(false),
+  stopEarlierBackgroundWork({}),
 );
 
 it.effect(
   "Stop reaches earlier background work after the newest run fails before provider start",
-  () => stopEarlierBackgroundWork(true),
+  () => stopEarlierBackgroundWork({ failedStart: true }),
 );
 
 it.effect.each(["thread.stop", "run.interrupt"] as const)(
   "%s stops background work when a later message is queued",
-  (stopType) => stopEarlierBackgroundWork(false, stopType),
+  (stopType) => stopEarlierBackgroundWork({ stopWithQueue: stopType }),
+);
+
+it.effect.each(["thread.stop", "run.interrupt"] as const)(
+  "%s reaches later background work when an older run is starting",
+  (stopType) => stopEarlierBackgroundWork({ stopWithQueue: stopType, olderStart: true }),
 );
