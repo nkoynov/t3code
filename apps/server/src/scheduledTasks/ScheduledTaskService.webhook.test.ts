@@ -8,6 +8,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Metric from "effect/Metric";
 import * as Queue from "effect/Queue";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
@@ -687,6 +688,69 @@ it.effect("deleting a task removes its delivery log", () =>
       yield* service.triggerWebhook(requestFor(task));
       yield* service.delete({ id: task.id });
       assert.equal((yield* service.listWebhookDeliveries({ id: task.id })).deliveries.length, 0);
+    }),
+  ),
+);
+
+const signatureFor = (secret: string) =>
+  `sha256=${NodeCrypto.createHmac("sha256", secret).update(pullRequestBody).digest("hex")}`;
+
+/** Count recorded by `t3_webhook_deliveries_total` for one outcome and source. */
+const deliveriesCounted = (outcome: string, source: "relay" | "direct") =>
+  Metric.snapshot.pipe(
+    Effect.map((snapshots) => {
+      const found = snapshots.find(
+        (snapshot) =>
+          snapshot.id === "t3_webhook_deliveries_total" &&
+          snapshot.attributes?.outcome === outcome &&
+          snapshot.attributes?.source === source,
+      );
+      return found?.type === "Counter" ? Number(found.state.count) : 0;
+    }),
+  );
+
+it.effect("counts each handled request by what happened to it", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: {
+            type: "webhook",
+            signature: {
+              header: "x-hub-signature-256",
+              encoding: "hex",
+              prefix: "sha256=",
+              secret: "github-secret",
+            },
+          },
+        }),
+      );
+      const before = {
+        accepted: yield* deliveriesCounted("accepted", "direct"),
+        rejected: yield* deliveriesCounted("rejected_signature", "direct"),
+        notFound: yield* deliveriesCounted("not_found", "direct"),
+        relayAccepted: yield* deliveriesCounted("accepted", "relay"),
+        duplicate: yield* deliveriesCounted("duplicate", "relay"),
+      };
+      const signed = {
+        "content-type": "application/json",
+        "x-hub-signature-256": signatureFor("github-secret"),
+      };
+      yield* service.triggerWebhook(requestFor(task, { headers: signed }));
+      yield* Queue.take(launches);
+      yield* service.triggerWebhook(requestFor(task));
+      yield* service.triggerWebhook(requestFor(task, { token: "wrong" }));
+      // A request the relay held, then the same request again.
+      const relayed = requestFor(task, { headers: signed, relayDeliveryId: "relay-1" });
+      yield* service.triggerWebhook(relayed);
+      yield* Queue.take(launches);
+      yield* service.triggerWebhook(relayed);
+
+      assert.equal((yield* deliveriesCounted("accepted", "direct")) - before.accepted, 1);
+      assert.equal((yield* deliveriesCounted("rejected_signature", "direct")) - before.rejected, 1);
+      assert.equal((yield* deliveriesCounted("not_found", "direct")) - before.notFound, 1);
+      assert.equal((yield* deliveriesCounted("accepted", "relay")) - before.relayAccepted, 1);
+      assert.equal((yield* deliveriesCounted("duplicate", "relay")) - before.duplicate, 1);
     }),
   ),
 );

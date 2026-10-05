@@ -193,11 +193,41 @@ export const hold = Effect.fn("HookInboxStore.hold")(function* (hook: HeldHook, 
     ON CONFLICT (id) DO NOTHING
     RETURNING id
   `;
-  if (inserted.length === 0) return null;
+  if (inserted.length === 0) {
+    yield* Effect.annotateCurrentSpan({ "relay.inbox.refused": yield* refusalReason(hook) });
+    return null;
+  }
   yield* setTarget(baseUrl, { resetFailures: false });
   const target = yield* readTarget;
+  const backlog = yield* backlogSize;
+  yield* Effect.annotateCurrentSpan({
+    "relay.inbox.held_count": backlog.count,
+    "relay.inbox.held_bytes": backlog.bytes,
+  });
   return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(target?.failures ?? 0));
 });
+
+const backlogSize = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly count: number; readonly bytes: number }>`
+    SELECT count(*) AS count, coalesce(sum(length(body)), 0) AS bytes FROM held_hooks
+  `;
+  return rows[0] ?? { count: 0, bytes: 0 };
+});
+
+/** Which cap refused a request, or that it was already held, for traces. */
+const refusalReason = (hook: HeldHook) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const existing = yield* sql<{ readonly id: string }>`
+      SELECT id FROM held_hooks WHERE id = ${hook.id}
+    `;
+    if (existing.length > 0) return "already_held";
+    const backlog = yield* backlogSize;
+    if (backlog.count >= HOOK_INBOX_MAX_REQUESTS) return "max_requests";
+    if (backlog.bytes + hook.body.byteLength > HOOK_INBOX_MAX_BYTES) return "max_bytes";
+    return "max_per_hook";
+  });
 
 /**
  * The environment is reachable again at `baseUrl`. Returns whether anything
@@ -226,7 +256,10 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
 ) {
   const sql = yield* SqlClient.SqlClient;
   const startedAt = yield* Clock.currentTimeMillis;
-  yield* sql`DELETE FROM held_hooks WHERE received_at < ${iso(startedAt - HOOK_INBOX_TTL_MS)}`;
+  const expired = yield* sql<{ readonly id: string }>`
+    DELETE FROM held_hooks WHERE received_at < ${iso(startedAt - HOOK_INBOX_TTL_MS)}
+    RETURNING id
+  `;
   const target = yield* readTarget;
   const batch = yield* sql<HeldHookRow>`
     SELECT id, received_at, method, raw_hook_id, raw_token, hook_key, query, headers, body
@@ -234,13 +267,33 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   `;
   if (batch.length === 0 || target === null) {
     if (target === null) yield* sql`DELETE FROM held_hooks`;
+    yield* Effect.annotateCurrentSpan({ "relay.inbox.expired": expired.length });
     return null;
   }
 
   let failures = target.failures;
   let sent = 0;
   let delivered = 0;
+  let unreadable = 0;
+  let longestWaitMs = 0;
   const busyHooks = new Set<string>();
+  /** What this run did, for the alarm's span; never request contents. */
+  const annotateRun = (result: string) =>
+    Effect.gen(function* () {
+      const backlog = yield* backlogSize;
+      yield* Effect.annotateCurrentSpan({
+        "relay.inbox.run_result": result,
+        "relay.inbox.sent": sent,
+        "relay.inbox.delivered": delivered,
+        "relay.inbox.busy_hooks": busyHooks.size,
+        "relay.inbox.expired": expired.length,
+        "relay.inbox.unreadable": unreadable,
+        "relay.inbox.consecutive_failures": failures,
+        "relay.inbox.longest_wait_ms": longestWaitMs,
+        "relay.inbox.held_count": backlog.count,
+        "relay.inbox.held_bytes": backlog.bytes,
+      });
+    });
   for (const row of batch) {
     if (sent === DELIVERIES_PER_RUN) break;
     // Later requests to a busy hook wait their turn, so its order is kept.
@@ -249,6 +302,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
     if (Option.isNone(headers)) {
       // Unreadable: it can never be delivered, and must not block the rest.
       yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
+      unreadable += 1;
       continue;
     }
     sent += 1;
@@ -266,6 +320,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
     if (outcome === "unreachable") {
       failures += 1;
       yield* setFailures(failures);
+      yield* annotateRun("unreachable");
       return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(failures));
     }
     if (failures !== 0) {
@@ -278,9 +333,16 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
     }
     yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
     delivered += 1;
+    const receivedAtMs = DateTime.toEpochMillis(DateTime.makeUnsafe(row.received_at));
+    longestWaitMs = Math.max(longestWaitMs, startedAt - receivedAtMs);
   }
-  if (!(yield* hasPending)) return null;
+  if (!(yield* hasPending)) {
+    yield* annotateRun("drained");
+    return null;
+  }
   // Everything left this run was busy: give those tasks a moment to drain.
   const now = yield* Clock.currentTimeMillis;
-  return delivered === 0 && busyHooks.size > 0 ? now + BUSY_RETRY_MS : now;
+  const idle = delivered === 0 && busyHooks.size > 0;
+  yield* annotateRun(idle ? "busy" : "more_pending");
+  return idle ? now + BUSY_RETRY_MS : now;
 });

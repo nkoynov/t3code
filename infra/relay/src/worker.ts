@@ -1,4 +1,5 @@
 import * as Alchemy from "alchemy";
+import * as Axiom from "alchemy/Axiom";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Drizzle from "alchemy/Drizzle/Postgres";
 import * as Config from "effect/Config";
@@ -336,6 +337,10 @@ export const ApiLive = Api.make(
           Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
           Effect.catch((error) =>
             Effect.logWarning("Hook rate limiter unavailable", { error: error.message }).pipe(
+              // Visible on the forward span, so an outage that disables limits shows up.
+              Effect.andThen(
+                Effect.annotateCurrentSpan({ "relay.hook.rate_limiter_failed_open": true }),
+              ),
               Effect.as(true),
             ),
           ),
@@ -468,6 +473,19 @@ export const ApiLive = Api.make(
         Layer.provideMerge(Cloudflare.DNS.ReadWriteDnsHttp),
         Layer.provideMerge(Cloudflare.Workers.RateLimitBinding),
         Layer.provideMerge(HookInboxObjectLive),
+        // Exports spans from events the HTTP tracer does not wrap, notably
+        // HookInboxObject calls and alarms, to the same Axiom dataset.
+        Layer.provideMerge(
+          Layer.unwrap(
+            Effect.map(RelayObservability, (observability) =>
+              Axiom.Telemetry({
+                serviceName: "t3code-relay",
+                token: observability.workerIngestToken,
+                traces: observability.traces,
+              }),
+            ),
+          ),
+        ),
       ),
     ),
   ),

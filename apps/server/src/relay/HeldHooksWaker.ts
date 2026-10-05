@@ -22,6 +22,7 @@ const wakeHeldHooks = Effect.fn("HeldHooksWaker.wake")(function* () {
   const environmentId = yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId;
   const client = yield* makeRelayEnvironmentClient(connection);
   const { pending } = yield* client.server.wakeHeldHooks({ params: { environmentId } });
+  yield* Effect.annotateCurrentSpan({ "relay.inbox.pending": pending });
   return pending;
 });
 

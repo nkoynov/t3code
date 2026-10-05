@@ -277,10 +277,14 @@ const make = Effect.gen(function* () {
     });
     // A coarse budget per endpoint first, so minting new hook ids or tokens
     // cannot buy unlimited lookups and forwards, or fill the inbox.
-    if (
-      !(yield* rateLimiter.allowEndpoint(parsed.endpointKey)) ||
-      !(yield* rateLimiter.allowHook(yield* hookBudgetKey(parsed)))
-    ) {
+    const endpointAllowed = yield* rateLimiter.allowEndpoint(parsed.endpointKey);
+    const hookAllowed =
+      endpointAllowed && (yield* rateLimiter.allowHook(yield* hookBudgetKey(parsed)));
+    if (!endpointAllowed || !hookAllowed) {
+      // Which budget ran out: the whole endpoint's, or this one hook URL's.
+      yield* Effect.annotateCurrentSpan({
+        "relay.hook.rate_limit": endpointAllowed ? "hook" : "endpoint",
+      });
       yield* outcome("rate_limited");
       return errorResponse(429, "rate_limited", {
         "retry-after": String(RELAY_HOOK_RATE_LIMIT.periodSeconds),
@@ -307,7 +311,10 @@ const make = Effect.gen(function* () {
       yield* outcome("not_found");
       return hookNotFound();
     }
-    yield* Effect.annotateCurrentSpan({ "relay.environment_id": endpoint.environmentId });
+    yield* Effect.annotateCurrentSpan({
+      "relay.environment_id": endpoint.environmentId,
+      "relay.hook.hold_while_offline": endpoint.holdWhileOffline,
+    });
 
     const body =
       request.method === "GET"
@@ -324,6 +331,7 @@ const make = Effect.gen(function* () {
 
     // One id per request, so a request that reached the environment before a
     // timeout and is later delivered from the inbox runs only once.
+    yield* Effect.annotateCurrentSpan({ "relay.hook.body_bytes": body.success.byteLength });
     const hook = {
       id: yield* crypto.randomUUIDv4.pipe(Effect.orDie),
       receivedAt,
@@ -361,6 +369,7 @@ const make = Effect.gen(function* () {
           return errorResponse(status, error);
         }
         if (!stored) {
+          // The inbox span carries which cap refused it (relay.inbox.refused).
           yield* outcome("inbox_full");
           return errorResponse(503, "inbox_full");
         }

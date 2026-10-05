@@ -41,6 +41,16 @@ export class HookInboxObject extends Cloudflare.DurableObject<
   HookInboxObjectShape
 >()("HookInboxObject") {}
 
+/**
+ * Each call into an inbox is its own trace: the alarm has no parent, and a
+ * hold arrives over Durable Object RPC without the forwarding span. The
+ * object's name is the endpoint key, which the forward spans carry too.
+ */
+const withInboxSpan =
+  (name: string, inboxId: string) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(Effect.withSpan(name, { root: true, attributes: { "relay.inbox.id": inboxId } }));
+
 const deliver = (baseUrl: string, hook: HookInboxStore.HeldHook) =>
   sendUpstream(baseUrl, hook).pipe(
     Effect.result,
@@ -81,6 +91,7 @@ export const HookInboxObjectLive = HookInboxObject.make(
     // @effect-diagnostics-next-line returnEffectInGen:off
     return Effect.gen(function* () {
       const sql = SqliteClient.layer({ storage: state.raw.storage });
+      const inboxId = state.raw.id.toString();
       const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(Effect.provide(sql), Effect.orDie);
       yield* run(HookInboxStore.migrate);
@@ -96,21 +107,23 @@ export const HookInboxObjectLive = HookInboxObject.make(
         hold: (hook: HookInboxStore.HeldHook, baseUrl: string) =>
           Effect.gen(function* () {
             const dueAt = yield* run(HookInboxStore.hold(hook, baseUrl));
+            yield* Effect.annotateCurrentSpan({ "relay.inbox.stored": dueAt !== null });
             if (dueAt === null) return false;
             yield* scheduleBy(dueAt);
             return true;
-          }),
+          }).pipe(withInboxSpan("relay.inbox.hold", inboxId)),
         wake: (baseUrl: string) =>
           Effect.gen(function* () {
             const pending = yield* run(HookInboxStore.wake(baseUrl));
+            yield* Effect.annotateCurrentSpan({ "relay.inbox.pending": pending });
             if (pending) yield* state.storage.setAlarm(yield* Clock.currentTimeMillis);
             return pending;
-          }),
+          }).pipe(withInboxSpan("relay.inbox.wake", inboxId)),
         clear: () =>
           Effect.gen(function* () {
             yield* run(HookInboxStore.clear);
             yield* state.storage.deleteAlarm();
-          }),
+          }).pipe(withInboxSpan("relay.inbox.clear", inboxId)),
         alarm: () =>
           run(HookInboxStore.deliverDue(deliver)).pipe(
             Effect.flatMap((nextAt) =>
@@ -118,10 +131,12 @@ export const HookInboxObjectLive = HookInboxObject.make(
             ),
             Effect.catchCause((cause) =>
               Effect.logWarning("Held webhook delivery run failed", { cause }).pipe(
+                Effect.andThen(Effect.annotateCurrentSpan({ "relay.inbox.run_result": "failed" })),
                 Effect.andThen(Clock.currentTimeMillis),
                 Effect.flatMap((now) => state.storage.setAlarm(now + RUN_FAILURE_RETRY_MS)),
               ),
             ),
+            withInboxSpan("relay.inbox.deliver", inboxId),
           ),
       };
     });

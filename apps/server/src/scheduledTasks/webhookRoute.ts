@@ -7,6 +7,7 @@ import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest"
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
+import * as Metrics from "../observability/Metrics.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
 /** Largest request body a webhook accepts. The relay enforces the same cap. */
@@ -45,9 +46,15 @@ const handleWebhook =
         ),
         Effect.option,
       );
-      if (Option.isNone(body)) return json(413, { error: "body_too_large_or_unreadable" });
+      // Refused before a task is looked up, so the service never sees them.
+      const tooLarge = (error: string) =>
+        Metrics.increment(Metrics.webhookDeliveriesTotal, {
+          outcome: "body_too_large",
+          source: request.headers["x-t3-relay-delivery-id"] ? "relay" : "direct",
+        }).pipe(Effect.as(json(413, { error })));
+      if (Option.isNone(body)) return yield* tooLarge("body_too_large_or_unreadable");
       if (body.value.byteLength > WEBHOOK_MAX_BODY_BYTES) {
-        return json(413, { error: "body_too_large" });
+        return yield* tooLarge("body_too_large");
       }
 
       const headers: Record<string, string> = {};
