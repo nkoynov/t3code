@@ -837,7 +837,7 @@ function TaskForm({
             options={[
               { value: "fixed_time", label: "At a time" },
               { value: "interval", label: "Interval" },
-              { value: "webhook", label: "Webhook" },
+              { value: "webhook", label: "On webhook" },
             ]}
             selected={draft.schedule.mode}
             onSelect={(mode) => {
