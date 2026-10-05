@@ -1209,14 +1209,16 @@ const RelayServerGroup = HttpApiGroup.make("server")
  * Public, stateless webhook forwarding to an environment's managed tunnel.
  * Unauthenticated: the token in the path is the environment's credential, and
  * the relay only routes and forwards. Raw, so the body reaches the
- * environment byte for byte and signatures still verify there.
+ * environment byte for byte and signatures still verify there. `endpointKey`
+ * names one managed endpoint (its tunnel's hash of user and environment), not
+ * the environment id, which any account can link.
  */
 const RelayHookParams = Schema.Struct({
-  environmentId: Schema.String,
+  endpointKey: Schema.String,
   hookId: Schema.String,
   token: Schema.String,
 });
-const RELAY_HOOK_PATH = "/v1/hooks/:environmentId/:hookId/:token";
+const RELAY_HOOK_PATH = "/v1/hooks/:endpointKey/:hookId/:token";
 const relayHookEndpoint = { params: RelayHookParams } as const;
 const RelayHooksGroup = HttpApiGroup.make("hooks")
   .add(

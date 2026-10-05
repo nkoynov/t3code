@@ -192,11 +192,20 @@ export const ApiLive = Api.make(
     const managedEndpointDnsBinding = yield* Cloudflare.DNS.ReadWriteDns(managedEndpointZone);
     const managedEndpointZoneName = yield* managedEndpointZone.name;
     const managedEndpointCleanupMode = yield* RelayConfiguration.managedEndpointCleanupModeConfig;
+    // Keys are endpoint keys or hashes over them, which already differ per
+    // stage, so stages sharing an account cannot collide in these namespaces.
     const hookRateLimit = yield* Cloudflare.RateLimit("HOOK_RATE_LIMIT", {
       namespaceId: 1001,
       simple: {
         limit: HookForwarder.RELAY_HOOK_RATE_LIMIT.limit,
         period: HookForwarder.RELAY_HOOK_RATE_LIMIT.periodSeconds,
+      },
+    });
+    const hookEndpointRateLimit = yield* Cloudflare.RateLimit("HOOK_ENDPOINT_RATE_LIMIT", {
+      namespaceId: 1002,
+      simple: {
+        limit: HookForwarder.RELAY_HOOK_ENDPOINT_RATE_LIMIT.limit,
+        period: HookForwarder.RELAY_HOOK_ENDPOINT_RATE_LIMIT.periodSeconds,
       },
     });
     const hookInboxes = yield* HookInboxObject;
@@ -231,9 +240,9 @@ export const ApiLive = Api.make(
       }).pipe(Effect.map(makeRelayTraceLayer)),
     );
 
-    // Each environment's held webhook requests live in its own Durable Object.
+    // Each managed endpoint's held webhook requests live in its own Durable Object.
     const inboxCall =
-      <A>(operation: HookInbox.HookInboxError["operation"], environmentId: string) =>
+      <A>(operation: HookInbox.HookInboxError["operation"], endpointKey: string) =>
       (effect: Effect.Effect<A, never, Alchemy.RuntimeContext>) =>
         effect.pipe(
           Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
@@ -241,22 +250,19 @@ export const ApiLive = Api.make(
             Effect.fail(
               new HookInbox.HookInboxError({
                 operation,
-                environmentId,
+                endpointKey,
                 cause: Cause.squash(cause),
               }),
             ),
           ),
         );
     const hookInboxLayer = Layer.succeed(HookInbox.HookInbox, {
-      hold: ({ environmentId, baseUrl, hook }) =>
-        hookInboxes
-          .getByName(environmentId)
-          .hold(hook, baseUrl)
-          .pipe(inboxCall("hold", environmentId)),
-      wake: ({ environmentId, baseUrl }) =>
-        hookInboxes.getByName(environmentId).wake(baseUrl).pipe(inboxCall("wake", environmentId)),
-      clear: ({ environmentId }) =>
-        hookInboxes.getByName(environmentId).clear().pipe(inboxCall("clear", environmentId)),
+      hold: ({ endpointKey, baseUrl, hook }) =>
+        hookInboxes.getByName(endpointKey).hold(hook, baseUrl).pipe(inboxCall("hold", endpointKey)),
+      wake: ({ endpointKey, baseUrl }) =>
+        hookInboxes.getByName(endpointKey).wake(baseUrl).pipe(inboxCall("wake", endpointKey)),
+      clear: ({ endpointKey }) =>
+        hookInboxes.getByName(endpointKey).clear().pipe(inboxCall("clear", endpointKey)),
     });
 
     const runtimeLayer = Layer.empty.pipe(
@@ -322,9 +328,10 @@ export const ApiLive = Api.make(
     );
 
     // Fails open: a limiter outage must not drop webhooks the environment would accept.
-    const hookRateLimiterLayer = Layer.succeed(HookForwarder.HookRateLimiter, {
-      allow: (key) =>
-        hookRateLimit.limit({ key }).pipe(
+    const allowWith =
+      (limiter: typeof hookRateLimit) =>
+      (key: string): Effect.Effect<boolean> =>
+        limiter.limit({ key }).pipe(
           Effect.map((result) => result.success),
           Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
           Effect.catch((error) =>
@@ -332,7 +339,10 @@ export const ApiLive = Api.make(
               Effect.as(true),
             ),
           ),
-        ),
+        );
+    const hookRateLimiterLayer = Layer.succeed(HookForwarder.HookRateLimiter, {
+      allowHook: allowWith(hookRateLimit),
+      allowEndpoint: allowWith(hookEndpointRateLimit),
     });
 
     const appLayer = Layer.merge(

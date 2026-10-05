@@ -194,6 +194,7 @@ function makeAllocations(
   },
 ): ManagedEndpointAllocations.ManagedEndpointAllocations["Service"] {
   return {
+    getByTunnelName: () => Effect.die("unused getByTunnelName"),
     get: () => Effect.succeed(allocation),
     reserve: () => Effect.die("unused"),
     recordTunnel: () => Effect.die("unused"),

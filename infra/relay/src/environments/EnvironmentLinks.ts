@@ -126,9 +126,15 @@ export class EnvironmentLinks extends Context.Service<
       readonly userId: string;
       readonly environmentId: string;
     }) => Effect.Effect<RelayLinkedEnvironmentRecord | null, EnvironmentLinkLookupPersistenceError>;
-    /** Active relay-managed links for an environment, across all users (webhook forwarding). */
+    /**
+     * Active relay-managed links for an environment, narrowed to one user or to
+     * links proven by one environment key. The environment id alone is public
+     * and any account can link it, so callers acting on it must narrow.
+     */
     readonly findActiveManagedForEnvironment: (input: {
       readonly environmentId: string;
+      readonly userId?: string;
+      readonly environmentPublicKey?: string;
     }) => Effect.Effect<
       ReadonlyArray<
         RelayLinkedEnvironmentRecord & {
@@ -138,9 +144,10 @@ export class EnvironmentLinks extends Context.Service<
       >,
       EnvironmentLinkEnvironmentLookupPersistenceError
     >;
-    /** Sets the webhook-hold opt-in on every active link of an environment. */
+    /** Sets the webhook-hold opt-in on the active links proven by one environment key. */
     readonly setHoldWebhooksWhileOffline: (input: {
       readonly environmentId: string;
+      readonly environmentPublicKey: string;
       readonly holdWebhooksWhileOffline: boolean;
     }) => Effect.Effect<void, EnvironmentLinkEnvironmentLookupPersistenceError>;
     readonly revokeForUser: (input: {
@@ -384,10 +391,13 @@ const make = Effect.gen(function* () {
             isNull(relayEnvironmentLinks.revokedAt),
             eq(relayEnvironmentLinks.endpointProviderKind, "cloudflare_tunnel"),
             eq(relayEnvironmentLinks.managedTunnelsEnabled, true),
+            input.userId === undefined ? undefined : eq(relayEnvironmentLinks.userId, input.userId),
+            input.environmentPublicKey === undefined
+              ? undefined
+              : eq(relayEnvironmentLinks.environmentPublicKey, input.environmentPublicKey),
           ),
         )
-        // One row per user who linked this environment; every row is checked
-        // until one has a ready endpoint, so none may be cut off.
+        // At most one row per user who linked this environment.
         .pipe(
           Effect.map((rows) =>
             rows.map((row) => ({
@@ -426,6 +436,7 @@ const make = Effect.gen(function* () {
         .where(
           and(
             eq(relayEnvironmentLinks.environmentId, input.environmentId),
+            eq(relayEnvironmentLinks.environmentPublicKey, input.environmentPublicKey),
             isNull(relayEnvironmentLinks.revokedAt),
           ),
         )

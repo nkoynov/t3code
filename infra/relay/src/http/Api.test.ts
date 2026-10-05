@@ -320,7 +320,6 @@ function relayUnlinkTestLayer(input?: {
   readonly reconcileOrigin?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["reconcileOrigin"];
   readonly release?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["release"];
   readonly clearInbox?: HookInbox.HookInbox["Service"]["clear"];
-  readonly activeLinks?: number;
 }) {
   return Layer.mergeAll(
     Layer.mock(HookInbox.HookInbox, {
@@ -339,15 +338,8 @@ function relayUnlinkTestLayer(input?: {
         listDeliveryUsersForEnvironment: () => Effect.die("unused listDeliveryUsersForEnvironment"),
         listForUser: () => Effect.die("unused listForUser"),
         getForUser: input?.getForUser ?? (() => Effect.succeed(null)),
-        findActiveManagedForEnvironment: () =>
-          Effect.succeed(
-            Array.from({ length: input?.activeLinks ?? 0 }, () => ({
-              ...linkedEnvironmentRecord,
-              userId: "user-2",
-              holdWebhooksWhileOffline: true,
-            })),
-          ),
-        setHoldWebhooksWhileOffline: () => Effect.void,
+        findActiveManagedForEnvironment: () => Effect.die("unused findActiveManagedForEnvironment"),
+        setHoldWebhooksWhileOffline: () => Effect.die("unused setHoldWebhooksWhileOffline"),
         revokeForUser: input?.revokeForUser ?? (() => Effect.succeed(false)),
       }),
     ),
@@ -914,24 +906,50 @@ describe("relay environment unlink", () => {
     );
   });
 
-  it.effect("drops held webhooks only once no user links the environment", () => {
+  it.effect("drops the unlinked endpoint's held webhooks, even if clearing fails", () => {
     const cleared: Array<string> = [];
-    const unlink = (activeLinks: number) =>
-      unlinkEnvironmentRecord({ userId: "user-1", environmentId: "environment-1" }).pipe(
+    const endpointKey = "0123456789abcdef";
+    const unlink = (clearFails: boolean) =>
+      unlinkEnvironmentRecord({
+        userId: "user-1",
+        environmentId: "environment-1",
+        managedEndpointNamespace: "dev",
+      }).pipe(
         Effect.provide(
           relayUnlinkTestLayer({
-            activeLinks,
             getForUser: () => Effect.succeed(linkedEnvironmentRecord),
             revokeForUser: () => Effect.succeed(true),
-            clearInbox: ({ environmentId }) => Effect.sync(() => void cleared.push(environmentId)),
+            prepareDeprovision: () =>
+              Effect.succeed({
+                userId: "user-1",
+                environmentId: "environment-1",
+                hostname: "dev-0123456789abcdef.example.test",
+                tunnelId: "tunnel-1",
+                tunnelName: `t3coderelay-managedendpoint-dev-${endpointKey}`,
+                dnsRecordId: "dns-1",
+                readyAt: "2026-07-28T00:00:00.000Z",
+                origin: null,
+                updatedAt: "2026-07-28T00:00:00.000Z",
+                generation: 1,
+              }),
+            clearInbox: (input) =>
+              clearFails
+                ? Effect.fail(
+                    new HookInbox.HookInboxError({
+                      operation: "clear",
+                      endpointKey: input.endpointKey,
+                      cause: new Error("unavailable"),
+                    }),
+                  )
+                : Effect.sync(() => void cleared.push(input.endpointKey)),
           }),
         ),
       );
     return Effect.gen(function* () {
-      yield* unlink(1);
-      expect(cleared).toEqual([]);
-      yield* unlink(0);
-      expect(cleared).toEqual(["environment-1"]);
+      expect(yield* unlink(false)).toBe(true);
+      expect(cleared).toEqual([endpointKey]);
+      // The link is already revoked; a failed clear must not fail the unlink.
+      expect(yield* unlink(true)).toBe(true);
     });
   });
 

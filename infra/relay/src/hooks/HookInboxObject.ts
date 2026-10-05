@@ -10,8 +10,14 @@ import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HookInboxStore from "./HookInboxStore.ts";
 import { sendUpstream, TUNNEL_OFFLINE_STATUS } from "./upstream.ts";
 
-/** Statuses that mean the environment did not get to the request; it is tried again later. */
-const RETRY_STATUSES = new Set([429, 502, 503, 504, TUNNEL_OFFLINE_STATUS]);
+/** Statuses that mean the environment is not there; the whole inbox waits and backs off. */
+const UNREACHABLE_STATUSES = new Set([502, 503, 504, TUNNEL_OFFLINE_STATUS]);
+/**
+ * Statuses that mean the environment is there but did not take this request
+ * yet: its task's queue is full (429) or it failed while handling it (500).
+ * The environment drops a delivery id it has already run, so retrying is safe.
+ */
+const BUSY_STATUSES = new Set([429, 500]);
 /** When a run itself fails, the next one is tried after this long. */
 const RUN_FAILURE_RETRY_MS = 60_000;
 
@@ -26,7 +32,7 @@ export interface HookInboxObjectShape {
 }
 
 /**
- * One per environment, addressed by environment id. Holds webhook requests
+ * One per managed endpoint, addressed by endpoint key. Holds webhook requests
  * the environment could not take, in SQLite, and pushes them back through
  * its tunnel from the alarm, oldest first, backing off while it stays away.
  */
@@ -41,9 +47,16 @@ const deliver = (baseUrl: string, hook: HookInboxStore.HeldHook) =>
     Effect.map((result): HookInboxStore.DeliveryOutcome => {
       // Unreachable or timed out: a timeout may still have run it, and the
       // environment drops a delivery id it has already seen.
-      if (Result.isFailure(result) || Option.isNone(result.success)) return "retry";
-      return RETRY_STATUSES.has(result.success.value.status) ? "retry" : "delivered";
+      if (Result.isFailure(result) || Option.isNone(result.success)) return "unreachable";
+      const status = result.success.value.status;
+      if (UNREACHABLE_STATUSES.has(status)) return "unreachable";
+      return BUSY_STATUSES.has(status) ? "busy" : "delivered";
     }),
+    Effect.tap((outcome) =>
+      outcome === "delivered"
+        ? Effect.void
+        : Effect.logInfo("Held webhook not delivered yet", { outcome, deliveryId: hook.id }),
+    ),
     Effect.provide(FetchHttpClient.layer),
   );
 

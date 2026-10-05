@@ -1,6 +1,7 @@
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -23,6 +24,8 @@ export const HOOK_INBOX_MAX_BYTES = 50 * 1_048_576;
 export const HOOK_INBOX_MAX_PER_HOOK = 100;
 /** Requests pushed per alarm run; the next run starts right away while more wait. */
 const DELIVERIES_PER_RUN = 20;
+/** Requests read per run, so requests behind a busy hook's backlog are still reached. */
+const ROWS_READ_PER_RUN = 200;
 const FIRST_RETRY_MS = 30_000;
 const MAX_RETRY_MS = 10 * 60_000;
 
@@ -41,8 +44,13 @@ export interface HeldHook {
   readonly body: Uint8Array;
 }
 
-/** `retry` keeps the request and backs off; `delivered` deletes it. */
-export type DeliveryOutcome = "delivered" | "retry";
+/**
+ * `delivered` deletes the request. `unreachable` keeps it and backs off the
+ * whole inbox, since nothing else will get through either. `busy` keeps it
+ * and its hook's later requests for the next run, but lets other hooks'
+ * requests go ahead, so one stuck task cannot hold up the rest.
+ */
+export type DeliveryOutcome = "delivered" | "busy" | "unreachable";
 
 /** 30 s, 1 min, 2 min, ... up to 10 min between attempts while the environment stays away. */
 export const retryDelayMs = (failures: number) =>
@@ -50,7 +58,7 @@ export const retryDelayMs = (failures: number) =>
 
 const HeadersJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
 const encodeHeaders = Schema.encodeSync(HeadersJson);
-const decodeHeaders = Schema.decodeUnknownSync(HeadersJson);
+const decodeHeaders = Schema.decodeUnknownOption(HeadersJson);
 
 interface HeldHookRow {
   readonly id: string;
@@ -173,9 +181,10 @@ export const clear = Effect.gen(function* () {
 });
 
 /**
- * Pushes the oldest held requests to the environment, one at a time, and
- * stops at the first one that has to be retried. Drops requests older than
- * the TTL. Returns when the next run is due, or null when nothing is left.
+ * Pushes the oldest held requests to the environment, one at a time, in
+ * order per hook. Stops at the first sign the environment is unreachable;
+ * skips past a hook whose environment answered busy. Drops requests older
+ * than the TTL. Returns when the next run is due, or null when nothing is left.
  */
 export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   send: (baseUrl: string, hook: HeldHook) => Effect.Effect<DeliveryOutcome, never, R>,
@@ -186,7 +195,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   const target = yield* readTarget;
   const batch = yield* sql<HeldHookRow>`
     SELECT id, received_at, method, raw_hook_id, raw_token, hook_key, query, headers, body
-    FROM held_hooks ORDER BY seq LIMIT ${DELIVERIES_PER_RUN}
+    FROM held_hooks ORDER BY seq LIMIT ${ROWS_READ_PER_RUN}
   `;
   if (batch.length === 0 || target === null) {
     if (target === null) yield* sql`DELETE FROM held_hooks`;
@@ -194,7 +203,20 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   }
 
   let failures = target.failures;
+  let sent = 0;
+  let delivered = 0;
+  const busyHooks = new Set<string>();
   for (const row of batch) {
+    if (sent === DELIVERIES_PER_RUN) break;
+    // Later requests to a busy hook wait their turn, so its order is kept.
+    if (busyHooks.has(row.hook_key)) continue;
+    const headers = decodeHeaders(row.headers);
+    if (Option.isNone(headers)) {
+      // Unreadable: it can never be delivered, and must not block the rest.
+      yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
+      continue;
+    }
+    sent += 1;
     const outcome = yield* send(target.base_url, {
       id: row.id,
       receivedAt: row.received_at,
@@ -203,19 +225,27 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
       rawToken: row.raw_token,
       hookKey: row.hook_key,
       query: row.query,
-      headers: decodeHeaders(row.headers),
+      headers: headers.value,
       body: row.body,
     });
-    if (outcome === "retry") {
+    if (outcome === "unreachable") {
       failures += 1;
       yield* setFailures(failures);
       return (yield* Clock.currentTimeMillis) + retryDelayMs(failures);
     }
-    yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
     if (failures !== 0) {
       failures = 0;
       yield* setFailures(0);
     }
+    if (outcome === "busy") {
+      busyHooks.add(row.hook_key);
+      continue;
+    }
+    yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
+    delivered += 1;
   }
-  return (yield* hasPending) ? yield* Clock.currentTimeMillis : null;
+  if (!(yield* hasPending)) return null;
+  // Everything left this run was busy: give those tasks a moment to drain.
+  const now = yield* Clock.currentTimeMillis;
+  return delivered === 0 && busyHooks.size > 0 ? now + FIRST_RETRY_MS : now;
 });

@@ -14,6 +14,10 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import { RelayApi } from "@t3tools/contracts/relay";
 
 import * as RelayConfiguration from "../Config.ts";
+import {
+  MANAGED_ENDPOINT_KEY_PATTERN,
+  managedEndpointTunnelNameForKey,
+} from "../deploymentConfig.ts";
 import { validateManagedEndpoint } from "../environments/EnvironmentConnector.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
@@ -23,6 +27,22 @@ import { sendUpstream, TUNNEL_OFFLINE_STATUS } from "./upstream.ts";
 export const RELAY_HOOK_PATH_PREFIX = "/v1/hooks/";
 export const RELAY_HOOK_MAX_BODY_BYTES = 1_048_576;
 export const RELAY_HOOK_RATE_LIMIT = { limit: 60, periodSeconds: 60 } as const;
+/**
+ * Hook budgets are per URL, and a sender who knows an endpoint key can mint
+ * new URLs for free, so every endpoint also has one overall budget.
+ */
+export const RELAY_HOOK_ENDPOINT_RATE_LIMIT = { limit: 600, periodSeconds: 60 } as const;
+/**
+ * Upstream statuses that mean the environment did not take the request: the
+ * tunnel has no origin (530) or cloudflared cannot reach the local server
+ * (502, 503, 504) while it restarts.
+ */
+export const ENVIRONMENT_UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([
+  502,
+  503,
+  504,
+  TUNNEL_OFFLINE_STATUS,
+]);
 
 const DROPPED_REQUEST_HEADERS = new Set([
   "host",
@@ -54,13 +74,13 @@ export const redactRelayHookUrl = (url: string): string => {
 
 /**
  * Request budget for public hook forwarding, keyed by a hash of the hook URL
- * (environment, hook and token). Requests with a wrong token get their own
+ * (endpoint, hook and token). Requests with a wrong token get their own
  * budget, so they cannot use up a real sender's; the environment rejects them.
  * Built from decoded segments, because the environment decodes them too: two
  * spellings of one token (`token`, `%74oken`) must share one budget.
  */
 const hookBudgetKey = (hook: {
-  readonly environmentId: string;
+  readonly endpointKey: string;
   readonly hookId: string;
   readonly token: string;
 }) =>
@@ -69,7 +89,7 @@ const hookBudgetKey = (hook: {
       "SHA-256",
       // Length-prefixed, so no segment contents can make two keys collide.
       new TextEncoder().encode(
-        [hook.environmentId, hook.hookId, hook.token]
+        [hook.endpointKey, hook.hookId, hook.token]
           .map((part) => `${part.length}:${part}`)
           .join(""),
       ),
@@ -82,7 +102,12 @@ const hookBudgetKey = (hook: {
 
 export class HookRateLimiter extends Context.Service<
   HookRateLimiter,
-  { readonly allow: (key: string) => Effect.Effect<boolean> }
+  {
+    /** One hook URL's budget, keyed by `hookBudgetKey`. */
+    readonly allowHook: (key: string) => Effect.Effect<boolean>;
+    /** One endpoint's overall budget, keyed by its endpoint key. */
+    readonly allowEndpoint: (endpointKey: string) => Effect.Effect<boolean>;
+  }
 >()("t3code-relay/hooks/HookForwarder/HookRateLimiter") {}
 
 export class HookForwarder extends Context.Service<
@@ -106,13 +131,15 @@ function parseHookPath(url: string) {
   const path = queryIndex === -1 ? url : url.slice(0, queryIndex);
   const search = queryIndex === -1 ? "" : url.slice(queryIndex);
   const segments = path.split("/");
-  // ["", "v1", "hooks", environmentId, hookId, token]
+  // ["", "v1", "hooks", endpointKey, hookId, token]
   if (segments.length !== 6) return null;
-  const [, , , rawEnvironmentId, rawHookId, rawToken] = segments;
-  if (!rawEnvironmentId || !rawHookId || !rawToken) return null;
+  const [, , , endpointKey, rawHookId, rawToken] = segments;
+  if (!endpointKey || !MANAGED_ENDPOINT_KEY_PATTERN.test(endpointKey) || !rawHookId || !rawToken) {
+    return null;
+  }
   try {
     return {
-      environmentId: decodeURIComponent(rawEnvironmentId),
+      endpointKey,
       hookId: decodeURIComponent(rawHookId),
       token: decodeURIComponent(rawToken),
       // Forward the encoded segments byte-for-byte; the environment decodes them.
@@ -183,29 +210,46 @@ const readCappedBody = (request: HttpServerRequest.HttpServerRequest) =>
   });
 
 /**
- * The environment's ready managed endpoint, across every user that linked it,
- * with whether it opted in to holding webhooks while offline.
+ * The ready managed endpoint a webhook URL's endpoint key names, with whether
+ * its link opted in to holding webhooks while offline. The key is the tunnel
+ * name's hash of user and environment, so it names exactly one allocation and
+ * at most one active link; nobody else can link their way onto it.
  */
 export const resolveHookEndpoint = Effect.fn("relay.hooks.resolve_endpoint")(function* (
-  environmentId: string,
+  endpointKey: string,
 ) {
   const links = yield* EnvironmentLinks.EnvironmentLinks;
   const allocations = yield* ManagedEndpointAllocations.ManagedEndpointAllocations;
   const settings = yield* RelayConfiguration.RelayConfiguration;
-  const candidates = yield* links.findActiveManagedForEnvironment({ environmentId });
-  for (const link of candidates) {
-    const allocation = yield* allocations.get({ userId: link.userId, environmentId });
-    const result = validateManagedEndpoint({
-      link,
-      allocation,
-      baseDomain: settings.managedEndpointBaseDomain,
-    });
-    if (Result.isSuccess(result)) {
-      return { ...result.success, holdWhileOffline: link.holdWebhooksWhileOffline };
-    }
-  }
-  return null;
+  if (!settings.managedEndpointNamespace) return null;
+  const allocation = yield* allocations.getByTunnelName(
+    managedEndpointTunnelNameForKey(settings.managedEndpointNamespace, endpointKey),
+  );
+  if (allocation === null) return null;
+  const [link] = yield* links.findActiveManagedForEnvironment({
+    environmentId: allocation.environmentId,
+    userId: allocation.userId,
+  });
+  if (!link) return null;
+  const result = validateManagedEndpoint({
+    link,
+    allocation,
+    baseDomain: settings.managedEndpointBaseDomain,
+  });
+  if (Result.isFailure(result)) return null;
+  return {
+    ...result.success,
+    environmentId: allocation.environmentId,
+    holdWhileOffline: link.holdWebhooksWhileOffline,
+  };
 });
+
+/** The endpoint key of an environment's own managed endpoint, for authenticated callers. */
+export const endpointKeyForTunnelName = (namespace: string, tunnelName: string): string | null => {
+  const prefix = managedEndpointTunnelNameForKey(namespace, "");
+  const key = tunnelName.startsWith(prefix) ? tunnelName.slice(prefix.length) : "";
+  return MANAGED_ENDPOINT_KEY_PATTERN.test(key) ? key : null;
+};
 
 const make = Effect.gen(function* () {
   const links = yield* EnvironmentLinks.EnvironmentLinks;
@@ -228,10 +272,15 @@ const make = Effect.gen(function* () {
       return hookNotFound();
     }
     yield* Effect.annotateCurrentSpan({
-      "relay.environment_id": parsed.environmentId,
+      "relay.hook.endpoint_key": parsed.endpointKey,
       "relay.hook_id": parsed.hookId,
     });
-    if (!(yield* rateLimiter.allow(yield* hookBudgetKey(parsed)))) {
+    // A coarse budget per endpoint first, so minting new hook ids or tokens
+    // cannot buy unlimited lookups and forwards, or fill the inbox.
+    if (
+      !(yield* rateLimiter.allowEndpoint(parsed.endpointKey)) ||
+      !(yield* rateLimiter.allowHook(yield* hookBudgetKey(parsed)))
+    ) {
       yield* outcome("rate_limited");
       return errorResponse(429, "rate_limited", {
         "retry-after": String(RELAY_HOOK_RATE_LIMIT.periodSeconds),
@@ -243,13 +292,13 @@ const make = Effect.gen(function* () {
       return errorResponse(413, "payload_too_large");
     }
 
-    const endpoint = yield* resolveHookEndpoint(parsed.environmentId).pipe(
+    const endpoint = yield* resolveHookEndpoint(parsed.endpointKey).pipe(
       Effect.provideService(EnvironmentLinks.EnvironmentLinks, links),
       Effect.provideService(ManagedEndpointAllocations.ManagedEndpointAllocations, allocations),
       Effect.provideService(RelayConfiguration.RelayConfiguration, settings),
       Effect.catch((error) =>
         Effect.logWarning("Failed to resolve hook endpoint", {
-          environmentId: parsed.environmentId,
+          endpointKey: parsed.endpointKey,
           errorTag: error._tag,
         }).pipe(Effect.as(null)),
       ),
@@ -258,6 +307,7 @@ const make = Effect.gen(function* () {
       yield* outcome("not_found");
       return hookNotFound();
     }
+    yield* Effect.annotateCurrentSpan({ "relay.environment_id": endpoint.environmentId });
 
     const body =
       request.method === "GET"
@@ -294,14 +344,14 @@ const make = Effect.gen(function* () {
         }
         const stored = yield* inbox
           .hold({
-            environmentId: parsed.environmentId,
+            endpointKey: parsed.endpointKey,
             baseUrl: endpoint.httpBaseUrl,
             hook,
           })
           .pipe(
             Effect.catch((cause) =>
               Effect.logWarning("Could not hold webhook request", {
-                environmentId: parsed.environmentId,
+                environmentId: endpoint.environmentId,
                 errorTag: cause._tag,
               }).pipe(Effect.as(null)),
             ),
@@ -323,13 +373,15 @@ const make = Effect.gen(function* () {
       Effect.result,
     );
     if (Result.isFailure(upstream)) {
+      yield* Effect.annotateCurrentSpan({ "relay.hook.upstream_error": upstream.failure._tag });
       return yield* holdOrFail(503, "environment_unavailable");
     }
     if (Option.isNone(upstream.success)) {
       return yield* holdOrFail(504, "environment_timeout");
     }
     const response = upstream.success.value;
-    if (response.status === TUNNEL_OFFLINE_STATUS) {
+    if (ENVIRONMENT_UNREACHABLE_STATUSES.has(response.status)) {
+      yield* Effect.annotateCurrentSpan({ "relay.hook.upstream_status": response.status });
       return yield* holdOrFail(503, "environment_unavailable");
     }
     yield* Effect.annotateCurrentSpan({
