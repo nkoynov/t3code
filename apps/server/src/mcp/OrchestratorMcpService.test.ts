@@ -24,6 +24,7 @@ import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
 import { buildUnavailableProviderSnapshot } from "../provider/unavailableProviderSnapshot.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
@@ -120,6 +121,7 @@ describe("OrchestratorMcpService", () => {
           list: () => Effect.succeed([]),
         }),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -209,6 +211,7 @@ describe("OrchestratorMcpService", () => {
           list: () => Effect.succeed([]),
         }),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -290,6 +293,7 @@ describe("OrchestratorMcpService", () => {
           list: () => Effect.succeed([]),
         }),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -363,6 +367,7 @@ describe("OrchestratorMcpService", () => {
           list: () => Effect.succeed([]),
         }),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -443,6 +448,7 @@ describe("OrchestratorMcpService", () => {
           list: () => Effect.succeed([]),
         }),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
       const scope: McpInvocationScope = {
@@ -644,6 +650,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             disabledAntigravityInstanceId,
           ]),
           Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
 
@@ -788,6 +795,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           }),
           adapterRegistryLayer([codexInstanceId, antigravityInstanceId]),
           Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         );
 
@@ -882,6 +890,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         }),
         adapterRegistryLayer([codexInstanceId, antigravityInstanceId]),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
 
@@ -931,6 +940,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         }),
         adapterRegistryLayer([codexInstanceId]),
         Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       );
 
@@ -1095,6 +1105,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             }),
             adapterRegistryLayer([codexInstanceId, codexAltInstanceId]),
             Layer.mock(ProjectService.ProjectService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
           );
 
