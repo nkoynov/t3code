@@ -70,12 +70,14 @@ Cloudflare rate limiter was unavailable and the request went through unlimited.
 
 Held requests are handled in the endpoint's `HookInboxObject`, and each call into it is its own
 trace, not a child of the forward span: `relay.inbox.hold`, `relay.inbox.wake`, and
-`relay.inbox.deliver` for each alarm run. Join them to forwards on the inbox, which is named by
-endpoint key. A hold the inbox refused carries `relay.inbox.refused` (`max_per_hook`,
-`max_requests`, `max_bytes`, or `already_held`). A delivery run carries `relay.inbox.run_result`
-(`drained`, `more_pending`, `busy`, `unreachable`, or `failed`), how many requests it sent and
-delivered, the consecutive failures behind the retry delay, the longest time a delivered request
-waited, and the backlog left.
+`relay.inbox.deliver` for each alarm run. Each carries `relay.hook.endpoint_key`, so they join to
+forwards. The details are on the child spans: `HookInboxStore.hold` carries
+`relay.inbox.refused` when the inbox refused a request (`max_per_hook`, `max_requests`,
+`max_bytes`, or `already_held`). `HookInboxStore.deliverDue` carries `relay.inbox.run_result`
+(`drained`, `more_pending`, `busy`, or `unreachable`), how many requests it sent and delivered,
+the consecutive failures behind the retry delay, the longest time a delivered request waited, and
+the backlog left. A run that errored outright has `relay.inbox.run_result = failed` on the root
+`relay.inbox.deliver` span instead.
 
 Questions these answer:
 
@@ -85,11 +87,17 @@ Questions these answer:
 | where name == 'relay.hooks.forward'
 | summarize count() by bin(_time, 1h), outcome = tostring(['attributes.custom']['relay.hook.outcome'])
 
-// Inboxes stuck behind an unreachable environment
+// Inboxes stuck behind an unreachable environment, by endpoint
 ['t3-code-relay-traces-prod']
-| where name == 'relay.inbox.deliver'
+| where name == 'HookInboxStore.deliverDue'
 | extend c = ['attributes.custom']
 | where tostring(c['relay.inbox.run_result']) == 'unreachable'
-| summarize runs = count(), failures = max(toint(c['relay.inbox.consecutive_failures'])),
-    backlog = max(toint(c['relay.inbox.held_count'])) by endpoint = tostring(c['relay.hook.endpoint_key'])
+| project trace_id, failures = toint(c['relay.inbox.consecutive_failures']),
+    backlog = toint(c['relay.inbox.held_count'])
+| join kind=inner (
+    ['t3-code-relay-traces-prod']
+    | where name == 'relay.inbox.deliver'
+    | project trace_id, endpoint = tostring(['attributes.custom']['relay.hook.endpoint_key'])
+  ) on trace_id
+| summarize runs = count(), failures = max(failures), backlog = max(backlog) by endpoint
 ```
