@@ -89,8 +89,8 @@ export function scheduleDraftForTask(task: Pick<ScheduledTask, "schedule">): Sch
   }
 }
 
-/** Blank means "no limit"; undefined means the input is not a valid limit. */
-function parseMaxDeliveryAge(value: string): number | null | undefined {
+/** Blank means "no limit"; undefined means the input is not a valid limit, which blocks saving. */
+export function parseMaxDeliveryAge(value: string): number | null | undefined {
   if (value.trim() === "") return null;
   const minutes = Number(value.trim());
   return Number.isInteger(minutes) && minutes > 0 && minutes <= MAX_WEBHOOK_DELIVERY_AGE_MINUTES

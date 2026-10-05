@@ -205,17 +205,20 @@ describe("webhook scheduled tasks", () => {
     });
   });
 
-  it("round-trips the max age and treats a blank or invalid entry as no limit", () => {
+  it("round-trips the max age, treats blank as no limit, and rejects an invalid limit", () => {
     const draft = taskToDraft({
       ...webhookTask,
       schedule: { type: "webhook", signature: null, maxDeliveryAgeMinutes: 90 },
     });
     expect(draft.maxDeliveryAgeMinutes).toBe("90");
     expect(scheduleFromDraft(draft)).toMatchObject({ maxDeliveryAgeMinutes: 90 });
-    for (const blank of ["", "  ", "0", "-5", "1.5", "abc"]) {
+    for (const blank of ["", "  "]) {
       expect(scheduleFromDraft({ ...draft, maxDeliveryAgeMinutes: blank })).toMatchObject({
         maxDeliveryAgeMinutes: null,
       });
+    }
+    for (const invalid of ["0", "-5", "1.5", "abc", "1441"]) {
+      expect(scheduleFromDraft({ ...draft, maxDeliveryAgeMinutes: invalid })).toBeNull();
     }
   });
 });

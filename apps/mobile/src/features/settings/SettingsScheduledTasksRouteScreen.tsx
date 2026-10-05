@@ -4,7 +4,10 @@ import type {
   ScheduledTask,
   ScheduledTaskUpsertInput,
 } from "@t3tools/contracts";
-import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import {
+  MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
+  resolveEnvironmentMachineKind,
+} from "@t3tools/contracts";
 import type { MenuAction } from "@react-native-menu/menu";
 import { DateTimePicker } from "@expo/ui/community/datetime-picker";
 import {
@@ -58,6 +61,7 @@ import { useSettingsEnvironmentFilter, type SettingsTarget } from "./settings-en
 import {
   editDraft,
   DEFAULT_WEBHOOK_PROMPT,
+  parseMaxDeliveryAge,
   scheduledTaskDefaultModel,
   scheduleFromDraft,
   type ScheduledTaskDraft as Draft,
@@ -130,7 +134,7 @@ function FormField(props: {
   readonly label: string;
   readonly value: string;
   readonly onChange: (value: string) => void;
-  readonly keyboardType?: "decimal-pad";
+  readonly keyboardType?: "decimal-pad" | "number-pad";
   readonly disabled?: boolean;
   readonly placeholder?: string;
   readonly borderTop?: boolean;
@@ -610,6 +614,16 @@ function TaskForm({
         : draft.schedule,
     );
     if (
+      draft.schedule.mode === "webhook" &&
+      parseMaxDeliveryAge(draft.schedule.maxDeliveryAgeMinutes) === undefined
+    ) {
+      Alert.alert(
+        "Invalid age limit",
+        `Enter whole minutes from 1 to ${MAX_WEBHOOK_DELIVERY_AGE_MINUTES}, or leave it blank.`,
+      );
+      return;
+    }
+    if (
       !draft.title.trim() ||
       !draft.prompt.trim() ||
       !draft.projectId ||
@@ -925,7 +939,7 @@ function TaskForm({
               label="Skip requests older than (minutes)"
               value={draft.schedule.maxDeliveryAgeMinutes}
               placeholder="Run every request"
-              keyboardType="decimal-pad"
+              keyboardType="number-pad"
               disabled={saving}
               borderTop
               onChange={(maxDeliveryAgeMinutes) =>

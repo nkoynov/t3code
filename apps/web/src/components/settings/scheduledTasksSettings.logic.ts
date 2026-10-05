@@ -93,8 +93,7 @@ export const WEBHOOK_SIGNATURE_DEFAULTS = {
 /** Prompt a new webhook task starts with: the whole request, which the user can narrow down. */
 export const DEFAULT_WEBHOOK_PROMPT = "Handle this webhook:\n{{request}}";
 
-/** Blank or invalid input means "no limit"; the server rejects values past the relay's TTL. */
-/** Blank means "no limit"; undefined means the input is not a valid limit. */
+/** Blank means "no limit"; undefined means the input is not a valid limit, which blocks saving. */
 export function parseMaxDeliveryAge(value: string): number | null | undefined {
   if (value.trim() === "") return null;
   const minutes = Number(value.trim());
@@ -103,8 +102,11 @@ export function parseMaxDeliveryAge(value: string): number | null | undefined {
     : undefined;
 }
 
-export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule {
+/** Null when the draft's webhook age limit is invalid; the caller reports it and does not save. */
+export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {
   if (draft.scheduleMode === "webhook") {
+    const maxDeliveryAgeMinutes = parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes);
+    if (maxDeliveryAgeMinutes === undefined) return null;
     const secret = draft.signatureSecret.trim();
     return {
       type: "webhook",
@@ -116,7 +118,7 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
             ...(secret ? { secret } : {}),
           }
         : null,
-      maxDeliveryAgeMinutes: parseMaxDeliveryAge(draft.maxDeliveryAgeMinutes) ?? null,
+      maxDeliveryAgeMinutes,
     };
   }
   if (draft.scheduleMode === "interval") {
