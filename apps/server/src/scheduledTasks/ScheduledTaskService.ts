@@ -55,16 +55,37 @@ const WEBHOOK_MAX_QUEUED_PER_TASK = 20;
 /** Accepted deliveries per task per minute, enforced here as well as on the relay because the tunnel hostname is public too. */
 const WEBHOOK_RATE_LIMIT_PER_MINUTE = 60;
 
-/** Where a webhook task's public URL points. `relayUrl` is null when the environment is not linked to T3 Connect. */
+/**
+ * Where a webhook task's public URL points: `${relayHookBaseUrl}/${taskId}/${token}`.
+ * Null when the environment has no managed tunnel on T3 Connect; clients then show the path.
+ */
 interface WebhookOrigin {
-  readonly environmentId: string;
-  readonly relayUrl: string | null;
+  readonly relayHookBaseUrl: string | null;
+}
+
+const ENDPOINT_KEY = /^[0-9a-f]{16}$/;
+
+/**
+ * The relay's hook URL prefix for this environment. The relay finds the
+ * environment by its managed tunnel's key (the tunnel name's last segment),
+ * so the URL never reveals the environment id.
+ */
+export function relayHookBaseUrl(input: {
+  readonly relayUrl: string;
+  readonly tunnelName: string | undefined;
+}): string | null {
+  const endpointKey = input.tunnelName?.split("-").at(-1);
+  const relayUrl = input.relayUrl.replace(/\/+$/, "");
+  if (relayUrl === "" || endpointKey === undefined || !ENDPOINT_KEY.test(endpointKey)) {
+    return null;
+  }
+  return `${relayUrl}/v1/hooks/${endpointKey}`;
 }
 
 export class ScheduledTaskWebhookOrigin extends Context.Reference<Effect.Effect<WebhookOrigin>>(
   "t3/scheduledTasks/ScheduledTaskWebhookOrigin",
   {
-    defaultValue: () => Effect.succeed({ environmentId: "local", relayUrl: null }),
+    defaultValue: () => Effect.succeed({ relayHookBaseUrl: null }),
   },
 ) {}
 
@@ -255,13 +276,10 @@ function webhookEndpoint(
   origin: WebhookOrigin | null,
 ): ScheduledTask["webhook"] {
   if (row.webhook_token === null) return undefined;
-  const relayUrl = origin?.relayUrl?.replace(/\/+$/, "") ?? null;
+  const base = origin?.relayHookBaseUrl ?? null;
   return {
     path: webhookPath(row.task_id, row.webhook_token),
-    url:
-      relayUrl === null || origin === null
-        ? null
-        : `${relayUrl}/v1/hooks/${encodeURIComponent(origin.environmentId)}/${encodeURIComponent(row.task_id)}/${row.webhook_token}`,
+    url: base === null ? null : `${base}/${encodeURIComponent(row.task_id)}/${row.webhook_token}`,
     hasSecret: row.webhook_secret !== null,
   };
 }

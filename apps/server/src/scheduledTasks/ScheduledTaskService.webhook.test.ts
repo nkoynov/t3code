@@ -64,7 +64,7 @@ const withService = <A, E>(
     readonly service: ScheduledTaskService.ScheduledTaskService["Service"];
     readonly launches: Queue.Queue<LaunchInput>;
   }) => Effect.Effect<A, E, never>,
-  options: { readonly gate?: Deferred.Deferred<void> } = {},
+  options: { readonly gate?: Deferred.Deferred<void>; readonly relayHookBaseUrl?: string } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
@@ -79,6 +79,10 @@ const withService = <A, E>(
           ),
       }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.succeed(
+        ScheduledTaskService.ScheduledTaskWebhookOrigin,
+        Effect.succeed({ relayHookBaseUrl: options.relayHookBaseUrl ?? null }),
+      ),
     );
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
@@ -118,6 +122,35 @@ it.effect("dispatches exactly the rendered prompt and logs the delivery", () =>
       assert.equal(delivery.body, new TextDecoder().decode(pullRequestBody));
       assert.equal(delivery.renderedPrompt, launched.initialMessage?.text);
     }),
+  ),
+);
+
+it("builds the relay hook URL from the managed tunnel's key, never the environment id", () => {
+  const relayUrl = "https://relay.example.com/";
+  assert.equal(
+    ScheduledTaskService.relayHookBaseUrl({
+      relayUrl,
+      tunnelName: "t3coderelay-managedendpoint-dev-julius-0123456789abcdef",
+    }),
+    "https://relay.example.com/v1/hooks/0123456789abcdef",
+  );
+  for (const tunnelName of [undefined, "t3coderelay-managedendpoint", "x-0123456789ABCDEF"]) {
+    assert.isNull(ScheduledTaskService.relayHookBaseUrl({ relayUrl, tunnelName }));
+  }
+});
+
+it.effect("gives webhook tasks a relay URL when the environment has a managed tunnel", () =>
+  withService(
+    ({ service }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* webhookTaskInput());
+        const token = task.webhook!.path.split("/").at(-1);
+        assert.equal(
+          task.webhook?.url,
+          `https://relay.example.com/v1/hooks/0123456789abcdef/scheduled-task%3Ahook/${token}`,
+        );
+      }),
+    { relayHookBaseUrl: "https://relay.example.com/v1/hooks/0123456789abcdef" },
   ),
 );
 

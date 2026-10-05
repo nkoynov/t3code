@@ -19,7 +19,8 @@ const json = (status: number, body: Record<string, string>) =>
  * Handles `/api/hooks/:hookId/:token` for every accepted method. The endpoint
  * is raw so the signature is checked over the exact body bytes; the service
  * checks the token and signature. It is reachable directly, over the managed
- * tunnel, or through the relay's stable `/v1/hooks/...` URL.
+ * tunnel, or through the relay's stable `/v1/hooks/:endpointKey/:hookId/:token`
+ * URL, where the endpoint key is this environment's managed tunnel key.
  */
 const handleWebhook =
   (scheduledTasks: ScheduledTaskService.ScheduledTaskService["Service"]) =>
