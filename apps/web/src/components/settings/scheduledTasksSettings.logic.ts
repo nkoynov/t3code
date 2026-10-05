@@ -1,6 +1,5 @@
 import {
   EnvironmentId,
-  MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
@@ -10,6 +9,7 @@ import {
   type ProviderInteractionMode,
   type ServerSettings,
 } from "@t3tools/contracts";
+import { parseMaxDeliveryAge } from "@t3tools/client-runtime/scheduled-task-webhook";
 
 import {
   resolveProjectSettings,
@@ -89,18 +89,6 @@ export const WEBHOOK_SIGNATURE_DEFAULTS = {
   signatureEncoding: "hex",
   signaturePrefix: "sha256=",
 } as const;
-
-/** Prompt a new webhook task starts with: the whole request, which the user can narrow down. */
-export const DEFAULT_WEBHOOK_PROMPT = "Handle this webhook:\n{{request}}";
-
-/** Blank means "no limit"; undefined means the input is not a valid limit, which blocks saving. */
-export function parseMaxDeliveryAge(value: string): number | null | undefined {
-  if (value.trim() === "") return null;
-  const minutes = Number(value.trim());
-  return Number.isInteger(minutes) && minutes > 0 && minutes <= MAX_WEBHOOK_DELIVERY_AGE_MINUTES
-    ? minutes
-    : undefined;
-}
 
 /** Null when the draft's webhook age limit is invalid; the caller reports it and does not save. */
 export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedule | null {

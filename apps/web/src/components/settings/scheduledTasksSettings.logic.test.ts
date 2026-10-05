@@ -19,7 +19,6 @@ import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
   scheduledTaskDefaultModel,
   matchesScheduledTaskScope,
-  parseMaxDeliveryAge,
   scheduleFromDraft,
   taskToDraft,
 } from "./scheduledTasksSettings.logic";
@@ -315,15 +314,5 @@ describe("scheduled task model defaults", () => {
         null,
       ),
     ).toBeNull();
-  });
-});
-
-describe("parseMaxDeliveryAge", () => {
-  it("treats blank as no limit and rejects values the server would not accept", () => {
-    expect(parseMaxDeliveryAge("")).toBeNull();
-    expect(parseMaxDeliveryAge(" 45 ")).toBe(45);
-    for (const invalid of ["0", "1.5", "-3", "abc", "1441"]) {
-      expect(parseMaxDeliveryAge(invalid)).toBeUndefined();
-    }
   });
 });

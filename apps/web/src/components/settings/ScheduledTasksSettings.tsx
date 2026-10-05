@@ -23,6 +23,7 @@ import type {
   ScheduledTaskWebhookDeliverySummary,
   ThreadId,
 } from "@t3tools/contracts";
+import { DEFAULT_WEBHOOK_PROMPT } from "@t3tools/client-runtime/scheduled-task-webhook";
 import {
   MAX_WEBHOOK_DELIVERY_AGE_MINUTES,
   MIN_SCHEDULED_TASK_INTERVAL_MS,
@@ -53,7 +54,6 @@ import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
-  DEFAULT_WEBHOOK_PROMPT,
   WEBHOOK_SIGNATURE_DEFAULTS,
   matchesScheduledTaskScope,
   scheduleFromDraft,
