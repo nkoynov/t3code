@@ -101,6 +101,27 @@ describe("HookInboxStore", () => {
     ),
   );
 
+  it.effect("reaches a hook queued behind busy hooks' full backlogs in the same run", () =>
+    withInbox(
+      Effect.gen(function* () {
+        for (const name of ["stuck-a", "stuck-b"]) {
+          const stuck = { rawHookId: name, hookKey: name };
+          for (let index = 0; index < HookInboxStore.HOOK_INBOX_MAX_PER_HOOK; index++) {
+            yield* HookInboxStore.hold(yield* hook(`${name}-${index}`, stuck), BASE_URL);
+          }
+        }
+        yield* HookInboxStore.hold(yield* hook("other-1"), BASE_URL);
+        const busy = deliverer((held) => (held.hookKey.startsWith("stuck") ? "busy" : "delivered"));
+        yield* HookInboxStore.deliverDue(busy.send);
+        expect(busy.sent.map((entry) => entry.hook.id)).toEqual([
+          "stuck-a-0",
+          "stuck-b-0",
+          "other-1",
+        ]);
+      }),
+    ),
+  );
+
   it.effect("drops a held request it cannot read instead of stalling on it", () =>
     withInbox(
       Effect.gen(function* () {

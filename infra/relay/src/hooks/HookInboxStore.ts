@@ -27,8 +27,8 @@ export const HOOK_INBOX_MAX_BYTES = 50 * 1_048_576;
 export const HOOK_INBOX_MAX_PER_HOOK = 100;
 /** Requests pushed per alarm run; the next run starts right away while more wait. */
 const DELIVERIES_PER_RUN = 20;
-/** Requests read per run, so requests behind a busy hook's backlog are still reached. */
-const ROWS_READ_PER_RUN = 200;
+/** Requests read at a time; a run keeps reading past busy hooks' backlogs. */
+const ROWS_READ_PER_PAGE = 50;
 /** Wait before trying a hook whose environment answered busy again. */
 const BUSY_RETRY_MS = 30_000;
 const MAX_RETRY_DELAY = Duration.minutes(10);
@@ -102,6 +102,7 @@ const encodeHeaders = Schema.encodeSync(HeadersJson);
 const decodeHeaders = Schema.decodeUnknownOption(HeadersJson);
 
 interface HeldHookRow {
+  readonly seq: number;
   readonly id: string;
   readonly received_at: string;
   readonly method: string;
@@ -279,10 +280,16 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
     RETURNING id
   `;
   const target = yield* readTarget;
-  const batch = yield* sql<HeldHookRow>`
-    SELECT id, received_at, method, raw_hook_id, raw_token, hook_key, query, headers, body
-    FROM held_hooks ORDER BY seq LIMIT ${ROWS_READ_PER_RUN}
-  `;
+  /** Oldest held requests after `afterSeq`, skipping hooks already found busy. */
+  const readPage = (afterSeq: number, skip: ReadonlySet<string>) =>
+    sql<HeldHookRow>`
+      SELECT seq, id, received_at, method, raw_hook_id, raw_token, hook_key, query, headers, body
+      FROM held_hooks
+      WHERE seq > ${afterSeq}
+        ${skip.size === 0 ? sql`` : sql`AND hook_key NOT IN ${sql.in([...skip])}`}
+      ORDER BY seq LIMIT ${ROWS_READ_PER_PAGE}
+    `;
+  let batch = yield* readPage(0, new Set());
   if (batch.length === 0 || target === null) {
     if (target === null) yield* sql`DELETE FROM held_hooks`;
     // Empty, so the next request held starts the schedule from the top.
@@ -314,46 +321,51 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
         "relay.inbox.held_bytes": backlog.bytes,
       });
     });
-  for (const row of batch) {
-    if (sent === DELIVERIES_PER_RUN) break;
-    // Later requests to a busy hook wait their turn, so its order is kept.
-    if (busyHooks.has(row.hook_key)) continue;
-    const headers = decodeHeaders(row.headers);
-    if (Option.isNone(headers)) {
-      // Unreadable: it can never be delivered, and must not block the rest.
+  // Pages run out only once every non-busy request has been tried, so a
+  // backlog behind busy hooks never hides another hook's requests.
+  pages: while (batch.length > 0) {
+    for (const row of batch) {
+      if (sent === DELIVERIES_PER_RUN) break pages;
+      // Later requests to a busy hook wait their turn, so its order is kept.
+      if (busyHooks.has(row.hook_key)) continue;
+      const headers = decodeHeaders(row.headers);
+      if (Option.isNone(headers)) {
+        // Unreadable: it can never be delivered, and must not block the rest.
+        yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
+        unreadable += 1;
+        continue;
+      }
+      sent += 1;
+      const outcome = yield* send(target.base_url, {
+        id: row.id,
+        receivedAt: row.received_at,
+        method: row.method,
+        rawHookId: row.raw_hook_id,
+        rawToken: row.raw_token,
+        hookKey: row.hook_key,
+        query: row.query,
+        headers: headers.value,
+        body: row.body,
+      });
+      if (outcome === "unreachable") {
+        failures = yield* countFailure;
+        yield* annotateRun("unreachable");
+        return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(failures));
+      }
+      if (failures !== 0) {
+        failures = 0;
+        yield* resetFailures;
+      }
+      if (outcome === "busy") {
+        busyHooks.add(row.hook_key);
+        continue;
+      }
       yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
-      unreadable += 1;
-      continue;
+      delivered += 1;
+      const receivedAtMs = DateTime.toEpochMillis(DateTime.makeUnsafe(row.received_at));
+      longestWaitMs = Math.max(longestWaitMs, startedAt - receivedAtMs);
     }
-    sent += 1;
-    const outcome = yield* send(target.base_url, {
-      id: row.id,
-      receivedAt: row.received_at,
-      method: row.method,
-      rawHookId: row.raw_hook_id,
-      rawToken: row.raw_token,
-      hookKey: row.hook_key,
-      query: row.query,
-      headers: headers.value,
-      body: row.body,
-    });
-    if (outcome === "unreachable") {
-      failures = yield* countFailure;
-      yield* annotateRun("unreachable");
-      return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(failures));
-    }
-    if (failures !== 0) {
-      failures = 0;
-      yield* resetFailures;
-    }
-    if (outcome === "busy") {
-      busyHooks.add(row.hook_key);
-      continue;
-    }
-    yield* sql`DELETE FROM held_hooks WHERE id = ${row.id}`;
-    delivered += 1;
-    const receivedAtMs = DateTime.toEpochMillis(DateTime.makeUnsafe(row.received_at));
-    longestWaitMs = Math.max(longestWaitMs, startedAt - receivedAtMs);
+    batch = yield* readPage(batch.at(-1)!.seq, busyHooks);
   }
   if (!(yield* hasPending)) {
     yield* resetFailures;
