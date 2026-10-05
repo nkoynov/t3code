@@ -5,7 +5,6 @@ import {
   ScheduledTaskId,
   type ScheduledTask,
   type ScheduledTaskUpsertSchedule,
-  type ScheduledTaskWebhookEndpoint,
   type ModelSelection,
   type RuntimeMode,
   type ProviderInteractionMode,
@@ -130,15 +129,6 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
     timeOfDay: draft.timeOfDay || "09:00",
     ...(selectedEveryDay ? {} : { weekdays: [...draft.weekdays].toSorted() }),
   };
-}
-
-/** The address a sender should call: the public Connect URL, else the path on this environment's address. */
-export function webhookUrl(
-  endpoint: ScheduledTaskWebhookEndpoint,
-  httpBaseUrl: string | null,
-): string {
-  if (endpoint.url !== null) return endpoint.url;
-  return httpBaseUrl ? new URL(endpoint.path, httpBaseUrl).href : endpoint.path;
 }
 
 export function taskToDraft(task: ScheduledTask): DraftState {

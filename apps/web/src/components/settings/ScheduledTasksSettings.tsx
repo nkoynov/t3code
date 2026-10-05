@@ -44,11 +44,7 @@ import {
 } from "../../providerInstances";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import {
-  useEnvironment,
-  useEnvironmentHttpBaseUrl,
-  type EnvironmentPresentation,
-} from "../../state/environments";
+import { useEnvironment, type EnvironmentPresentation } from "../../state/environments";
 import { useProjects } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
@@ -64,7 +60,6 @@ import {
   scheduleFromDraft,
   scheduledTaskDefaultModel,
   taskToDraft,
-  webhookUrl,
   type DraftState,
   type ScheduleMode,
   type WorkspaceMode,
@@ -667,7 +662,6 @@ function WebhookEndpointField({
   readonly environmentId: EnvironmentId;
   readonly task: ScheduledTask | null;
 }) {
-  const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "webhook URL" });
   const rotate = useAtomCommand(serverEnvironment.rotateScheduledTaskWebhookToken, {
     label: "scheduled task rotate webhook token",
@@ -677,7 +671,8 @@ function WebhookEndpointField({
   if (!task || !endpoint) {
     return <p className="text-sm text-muted-foreground">The URL appears after you save.</p>;
   }
-  const url = webhookUrl(endpoint, httpBaseUrl);
+  // Only the server's public URL is copyable; the path alone is not something a sender can call.
+  const url = endpoint.url;
   const rotateUrl = async () => {
     const confirmed =
       (await requestConfirmDialog("Rotate this webhook URL?\nThe current URL stops working.", {
@@ -705,21 +700,21 @@ function WebhookEndpointField({
       <div className="flex items-center gap-2">
         <Input
           readOnly
-          aria-label="Webhook URL"
-          value={url}
+          aria-label={url === null ? "Webhook path" : "Webhook URL"}
+          value={url ?? endpoint.path}
           onFocus={(event) => event.currentTarget.select()}
         />
-        <Button
-          size="sm"
-          variant="outline"
-          type="button"
-          // A bare path is not a URL a sender can call.
-          disabled={!url.startsWith("http")}
-          onClick={() => copyToClipboard(url, undefined)}
-        >
-          <CopyIcon />
-          {isCopied ? "Copied" : "Copy"}
-        </Button>
+        {url !== null ? (
+          <Button
+            size="sm"
+            variant="outline"
+            type="button"
+            onClick={() => copyToClipboard(url, undefined)}
+          >
+            <CopyIcon />
+            {isCopied ? "Copied" : "Copy"}
+          </Button>
+        ) : null}
         <Button
           size="sm"
           variant="outline"
@@ -730,10 +725,9 @@ function WebhookEndpointField({
           Rotate
         </Button>
       </div>
-      {endpoint.url === null ? (
+      {url === null ? (
         <p className="text-xs text-muted-foreground">
-          Link this environment to T3 Connect for a public URL. This address works wherever the
-          environment is reachable.
+          A public URL needs a managed tunnel. Link this environment to T3 Connect to get one.
         </p>
       ) : null}
     </div>

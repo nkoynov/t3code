@@ -22,7 +22,6 @@ import {
   parseMaxDeliveryAge,
   scheduleFromDraft,
   taskToDraft,
-  webhookUrl,
 } from "./scheduledTasksSettings.logic";
 
 const laptopId = EnvironmentId.make("laptop");
@@ -218,17 +217,6 @@ describe("webhook scheduled tasks", () => {
         maxDeliveryAgeMinutes: null,
       });
     }
-  });
-
-  it("prefers the Connect URL and otherwise resolves the path on the environment", () => {
-    const endpoint = { path: "/api/hooks/id/token", url: null, hasSecret: false };
-    expect(webhookUrl({ ...endpoint, url: "https://relay/v1/hooks/e/id/token" }, null)).toBe(
-      "https://relay/v1/hooks/e/id/token",
-    );
-    expect(webhookUrl(endpoint, "https://box.tailnet.ts.net:3773/")).toBe(
-      "https://box.tailnet.ts.net:3773/api/hooks/id/token",
-    );
-    expect(webhookUrl(endpoint, null)).toBe("/api/hooks/id/token");
   });
 });
 

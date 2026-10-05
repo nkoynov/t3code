@@ -38,7 +38,6 @@ import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollVie
 import { SegmentedControl } from "../../components/SegmentedControl";
 import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
-import { usePreparedConnection } from "../../state/session";
 import { buildModelOptions } from "../../lib/modelOptions";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useProjects, useEnvironmentServerConfig } from "../../state/entities";
@@ -997,14 +996,9 @@ function WebhookScheduleDetails({
     label: "scheduled task rotate webhook token",
     reportFailure: false,
   });
-  const preparedConnection = usePreparedConnection(environmentId);
-  const httpBaseUrl =
-    preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null;
   const webhook = task?.schedule.type === "webhook" ? task.webhook : undefined;
-  // Without T3 Connect, the path is resolved on the address this phone uses.
-  const address = webhook
-    ? (webhook.url ?? (httpBaseUrl ? new URL(webhook.path, httpBaseUrl).href : webhook.path))
-    : null;
+  // Only the server's public URL is copyable; the path alone is not something a sender can call.
+  const url = webhook?.url ?? null;
   return (
     <View className="gap-2 border-t border-border-subtle px-4 py-3">
       <Text className="text-sm text-foreground-muted">
@@ -1012,31 +1006,34 @@ function WebhookScheduleDetails({
           "The prompt can use {{body.a.b}}, {{headers.name}}, {{query.name}}, {{body}} and {{request}}. The filled-in prompt is all the agent sees."
         }
       </Text>
-      {task === null || address === null ? (
+      {task === null || !webhook ? (
         <Text className="text-sm text-foreground-muted">Save the task to get its webhook URL.</Text>
       ) : (
         <>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Copy webhook URL"
-            accessibilityHint="Copies the URL to the clipboard"
-            // A bare path is not something a sender can call, so only full URLs copy.
-            disabled={!address.startsWith("http")}
-            onPress={() => void tryCopyTextWithHaptic(address)}
-            className="gap-1 active:opacity-70"
-          >
-            <Text className="text-lg text-foreground">
-              {address.startsWith("http") ? "Webhook URL" : "Webhook path"}
-            </Text>
-            <Text className="text-sm text-foreground-muted" numberOfLines={2} selectable>
-              {address}
-            </Text>
-          </Pressable>
-          {webhook?.url === null ? (
-            <Text className="text-sm text-foreground-muted">
-              Link this environment to T3 Connect for a public URL.
-            </Text>
-          ) : null}
+          {url !== null ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Copy webhook URL"
+              accessibilityHint="Copies the URL to the clipboard"
+              onPress={() => void tryCopyTextWithHaptic(url)}
+              className="gap-1 active:opacity-70"
+            >
+              <Text className="text-lg text-foreground">Webhook URL</Text>
+              <Text className="text-sm text-foreground-muted" numberOfLines={2} selectable>
+                {url}
+              </Text>
+            </Pressable>
+          ) : (
+            <View className="gap-1">
+              <Text className="text-lg text-foreground">Webhook path</Text>
+              <Text className="text-sm text-foreground-muted" numberOfLines={2} selectable>
+                {webhook.path}
+              </Text>
+              <Text className="text-sm text-foreground-muted">
+                A public URL needs a managed tunnel. Link this environment to T3 Connect to get one.
+              </Text>
+            </View>
+          )}
           <Pressable
             accessibilityRole="button"
             onPress={() =>
