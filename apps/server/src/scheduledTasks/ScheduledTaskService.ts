@@ -1,6 +1,7 @@
 import {
   CommandId,
   MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ScheduledTask,
   ScheduledTaskError,
   ScheduledTaskId,
@@ -55,6 +56,8 @@ export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
 const WEBHOOK_DELIVERY_RETENTION = 50;
 /** Body text kept in the delivery log. Larger bodies are cut and flagged. */
 const WEBHOOK_DELIVERY_LOG_BODY_LIMIT = 64 * 1024;
+/** Rendered prompt text kept in the delivery log. */
+const WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT = 64 * 1024;
 /** Deliveries one task may hold at once, running or waiting their turn. */
 const WEBHOOK_MAX_QUEUED_PER_TASK = 20;
 /** Accepted deliveries per task per minute, enforced here as well as on the relay because the tunnel hostname is public too. */
@@ -1213,6 +1216,7 @@ export const layer = Layer.effect(
       readonly signatureVerified: boolean;
       readonly missing: ReadonlyArray<string>;
       readonly renderedPrompt: string | null;
+      readonly error?: string;
     }) => {
       const truncated = input.request.body.byteLength > WEBHOOK_DELIVERY_LOG_BODY_LIMIT;
       const loggedBody = truncated
@@ -1236,7 +1240,8 @@ export const layer = Layer.effect(
                 ${loggedBody},
                 ${input.request.body.byteLength}, ${truncated ? 1 : 0}, ${input.outcome},
                 ${input.signatureVerified ? 1 : 0}, ${encodeMissingFieldsJson(input.missing)},
-                ${input.renderedPrompt}, NULL
+                ${input.renderedPrompt?.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT) ?? null},
+                ${input.error ?? null}
               WHERE EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${input.taskId})
               -- A held request retried after a rate limit reuses its relay
               -- delivery id; the newer attempt replaces the logged one.
@@ -1245,7 +1250,7 @@ export const layer = Layer.effect(
                 signature_verified = excluded.signature_verified,
                 missing_fields_json = excluded.missing_fields_json,
                 rendered_prompt = excluded.rendered_prompt,
-                error = NULL
+                error = excluded.error
             `;
             yield* sql`
             DELETE FROM scheduled_task_webhook_deliveries
@@ -1404,6 +1409,7 @@ export const layer = Layer.effect(
                 readonly signatureVerified?: boolean;
                 readonly missing?: ReadonlyArray<string>;
                 readonly renderedPrompt?: string;
+                readonly error?: string;
               } = {},
             ) =>
               recordDelivery({
@@ -1415,6 +1421,7 @@ export const layer = Layer.effect(
                 signatureVerified: details.signatureVerified ?? false,
                 missing: details.missing ?? [],
                 renderedPrompt: details.renderedPrompt ?? null,
+                ...(details.error === undefined ? {} : { error: details.error }),
               });
 
             // Only the first rejected request in a window is logged, so a flood
@@ -1454,6 +1461,17 @@ export const layer = Layer.effect(
             }
 
             const rendered = renderWebhookPrompt(task.prompt, request);
+            // A provider refuses a turn this long, so it is not started. The
+            // delivery is not retryable, so the claim is kept.
+            if (rendered.prompt.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+              yield* log("dispatch_failed", {
+                signatureVerified: signature !== null,
+                missing: rendered.missing,
+                renderedPrompt: rendered.prompt,
+                error: "The filled-in prompt is too long.",
+              });
+              return { _tag: "accepted" as const, deliveryId };
+            }
             // Bound the deliveries one task holds, so steady traffic to a stuck
             // task cannot pile up parked fibers. A refused request is not logged,
             // so it cannot push real deliveries out of the log.

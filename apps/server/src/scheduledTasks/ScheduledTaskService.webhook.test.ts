@@ -493,6 +493,30 @@ it.effect("logs a body's first 64 KiB by bytes, not characters", () =>
   ),
 );
 
+it.effect("does not start a run when the filled-in prompt is too long", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ prompt: "{{body}}" }));
+      const text = "x".repeat(200_000);
+      const body = new TextEncoder().encode(text);
+      const result = yield* service.triggerWebhook(requestFor(task, { body, bodyText: text }));
+      assert.equal(result._tag, "accepted");
+      assert.equal(yield* Queue.size(launches), 0);
+      const { delivery } = yield* service.getWebhookDelivery({
+        id: task.id,
+        deliveryId: result._tag === "accepted" ? result.deliveryId : ("" as never),
+      });
+      assert.equal(delivery.outcome, "dispatch_failed");
+      assert.equal(delivery.error, "The filled-in prompt is too long.");
+      assert.equal(delivery.renderedPrompt?.length, 64 * 1024);
+      // The queue slot was never taken: a normal delivery still runs.
+      const ok = yield* service.triggerWebhook(requestFor(task));
+      assert.equal(ok._tag, "accepted");
+      yield* Queue.take(launches);
+    }),
+  ),
+);
+
 it.effect("a held request already delivered directly runs only once", () =>
   withService(({ service, launches }) =>
     Effect.gen(function* () {
