@@ -41,7 +41,12 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import { isMissedFixedTimeRun, isSameSchedule, nextScheduledRunAt } from "./Schedule.ts";
-import { renderWebhookPrompt, type WebhookRequest } from "./webhookTemplate.ts";
+import {
+  redactHeaders,
+  redactQuery,
+  renderWebhookPrompt,
+  type WebhookRequest,
+} from "./webhookTemplate.ts";
 import { constantTimeEquals, verifyWebhookSignature } from "./webhookVerification.ts";
 
 /** Path prefix of the environment route that receives webhook requests. */
@@ -252,19 +257,6 @@ function errorMessage(error: unknown): string {
   if (Cause.isCause(error)) return Cause.pretty(error);
   if (error instanceof Error) return error.message;
   return String(error);
-}
-
-/** Headers kept out of the delivery log because they commonly carry credentials. */
-const REDACTED_HEADER =
-  /^(authorization|proxy-authorization|cookie|set-cookie)$|token|secret|signature|key|password|auth/i;
-
-function redactHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(headers).map(([name, value]) => [
-      name,
-      REDACTED_HEADER.test(name) ? "[redacted]" : value,
-    ]),
-  );
 }
 
 function webhookPath(taskId: string, token: string): string {
@@ -1239,7 +1231,8 @@ export const layer = Layer.effect(
               )
               SELECT
                 ${input.id}, ${input.taskId}, ${input.receivedAt}, ${input.request.method},
-                ${input.request.query}, ${encodeHeadersJson(redactHeaders(input.request.headers))},
+                ${redactQuery(input.request.query)},
+                ${encodeHeadersJson(redactHeaders(input.request.headers))},
                 ${loggedBody},
                 ${input.request.body.byteLength}, ${truncated ? 1 : 0}, ${input.outcome},
                 ${input.signatureVerified ? 1 : 0}, ${encodeMissingFieldsJson(input.missing)},

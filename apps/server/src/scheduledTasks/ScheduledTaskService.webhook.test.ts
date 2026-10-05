@@ -335,12 +335,13 @@ it.effect("keeps the newest 50 deliveries when they share a timestamp", () =>
   ),
 );
 
-it.effect("keeps credential headers out of the delivery log", () =>
+it.effect("keeps credential headers and query values out of the delivery log", () =>
   withService(({ service }) =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
       yield* service.triggerWebhook(
         requestFor(task, {
+          query: "page=2&api_key=k",
           headers: {
             "content-type": "application/json",
             authorization: "Bearer sender-token",
@@ -354,6 +355,7 @@ it.effect("keeps credential headers out of the delivery log", () =>
         id: task.id,
         deliveryId: summary!.id,
       });
+      assert.equal(delivery.query, "page=2&api_key=[redacted]");
       assert.equal(delivery.headers.authorization, "[redacted]");
       assert.equal(delivery.headers["x-webhook-key"], "[redacted]");
       assert.equal(delivery.headers["x-github-event"], "push");
