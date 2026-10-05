@@ -911,8 +911,12 @@ function TaskForm({
           <>
             <WebhookScheduleDetails
               environmentId={environmentId}
+              // The live row, so a rotated URL shows up without reopening the form.
+              // Once the list has loaded, a missing task is gone; don't keep showing its URL.
               task={
-                tasks.data?.tasks.find((task) => task.id === draft.task?.id) ?? draft.task ?? null
+                tasks.data
+                  ? (tasks.data.tasks.find((task) => task.id === draft.task?.id) ?? null)
+                  : draft.task
               }
               signatureConfigured={draft.schedule.signature !== null}
             />
