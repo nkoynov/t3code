@@ -6,8 +6,10 @@ import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -504,6 +506,36 @@ it.effect("a held request already delivered directly runs only once", () =>
       yield* Queue.take(launches);
       const logged = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
       assert.equal(logged.length, 1);
+    }),
+  ),
+);
+
+it.effect("a held request whose sender hung up mid-request still runs", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput());
+      // The relay times out and the request fiber is interrupted. A small
+      // operation budget makes the request yield often, so stepping the
+      // interrupt one yield later each time lands it at every point in the
+      // request (one takes about 40 yields), then the relay retries.
+      for (let step = 0; step < 60; step++) {
+        const request = requestFor(task, { relayDeliveryId: `hung-up-${step}` });
+        const fiber = yield* service
+          .triggerWebhook(request)
+          .pipe(Effect.provideService(EffectScheduler.MaxOpsBeforeYield, 8), Effect.forkChild);
+        for (let yields = 0; yields < step; yields++) yield* Effect.yieldNow;
+        yield* Fiber.interrupt(fiber);
+        const retried = yield* service.triggerWebhook(request);
+        assert.equal(retried._tag, "accepted");
+        const deliveryId = retried._tag === "accepted" ? retried.deliveryId : undefined;
+        // Logged and run exactly once, whether or not the first attempt got through.
+        yield* service.getWebhookDelivery({ id: task.id, deliveryId: deliveryId! });
+        const launch = yield* Queue.take(launches);
+        assert.include(launch.commandId, `hung-up-${step}`);
+        // Keep each step in a fresh rate-limit window.
+        yield* TestClock.adjust("61 seconds");
+      }
+      assert.equal(yield* Queue.size(launches), 0);
     }),
   ),
 );

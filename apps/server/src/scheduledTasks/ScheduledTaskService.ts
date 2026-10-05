@@ -1347,7 +1347,8 @@ export const layer = Layer.effect(
           return { _tag: "not_found" as const };
         }
         const task = yield* decodeRow(row);
-        if (task.schedule.type !== "webhook") return { _tag: "not_found" as const };
+        const schedule = task.schedule;
+        if (schedule.type !== "webhook") return { _tag: "not_found" as const };
 
         const now = yield* localNow;
         const receivedAt =
@@ -1373,127 +1374,136 @@ export const layer = Layer.effect(
                 DELETE FROM scheduled_task_webhook_relay_deliveries
                 WHERE relay_delivery_id = ${request.relayDeliveryId}
               `.pipe(Effect.ignore, Effect.as(result));
-        if (request.relayDeliveryId !== undefined) {
-          const claimed = yield* sql<{ relay_delivery_id: string }>`
-            INSERT INTO scheduled_task_webhook_relay_deliveries
-              (relay_delivery_id, task_id, seen_at)
-            VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
-            ON CONFLICT (relay_delivery_id) DO NOTHING
-            RETURNING relay_delivery_id
-          `.pipe(
-            Effect.mapError((cause) =>
-              taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
-            ),
-          );
-          if (claimed.length === 0) return { _tag: "accepted" as const, deliveryId };
-          // Older claims can no longer be replayed by the relay.
-          yield* sql`
-            DELETE FROM scheduled_task_webhook_relay_deliveries
-            WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
-          `.pipe(Effect.ignore);
-        }
-        const log = (
-          outcome: ScheduledTaskWebhookDeliveryOutcome,
-          details: {
-            readonly signatureVerified?: boolean;
-            readonly missing?: ReadonlyArray<string>;
-            readonly renderedPrompt?: string;
-          } = {},
-        ) =>
-          recordDelivery({
-            id: deliveryId,
-            taskId: task.id,
-            receivedAt: iso(receivedAt),
-            request,
-            outcome,
-            signatureVerified: details.signatureVerified ?? false,
-            missing: details.missing ?? [],
-            renderedPrompt: details.renderedPrompt ?? null,
-          });
+        // From the claim until the run is forked nothing may interrupt: a
+        // request dropped in between (the relay hangs up after its timeout)
+        // would leave a claimed delivery that never runs, or a queue slot
+        // that is never released. Everything in here is local and quick.
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (request.relayDeliveryId !== undefined) {
+              const claimed = yield* sql<{ relay_delivery_id: string }>`
+                INSERT INTO scheduled_task_webhook_relay_deliveries
+                  (relay_delivery_id, task_id, seen_at)
+                VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
+                ON CONFLICT (relay_delivery_id) DO NOTHING
+                RETURNING relay_delivery_id
+              `.pipe(
+                Effect.mapError((cause) =>
+                  taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
+                ),
+              );
+              if (claimed.length === 0) return { _tag: "accepted" as const, deliveryId };
+              // Older claims can no longer be replayed by the relay.
+              yield* sql`
+                DELETE FROM scheduled_task_webhook_relay_deliveries
+                WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
+              `.pipe(Effect.ignore);
+            }
+            const log = (
+              outcome: ScheduledTaskWebhookDeliveryOutcome,
+              details: {
+                readonly signatureVerified?: boolean;
+                readonly missing?: ReadonlyArray<string>;
+                readonly renderedPrompt?: string;
+              } = {},
+            ) =>
+              recordDelivery({
+                id: deliveryId,
+                taskId: task.id,
+                receivedAt: iso(receivedAt),
+                request,
+                outcome,
+                signatureVerified: details.signatureVerified ?? false,
+                missing: details.missing ?? [],
+                renderedPrompt: details.renderedPrompt ?? null,
+              });
 
-        // Only the first rejected request in a window is logged, so a flood
-        // cannot write rows or push the real deliveries out of the log.
-        const slot = yield* takeRateSlot(task.id, DateTime.toEpochMillis(now));
-        if (slot !== "allowed") {
-          if (slot === "first_rejected") yield* log("rate_limited");
-          return yield* releaseClaim({ _tag: "rate_limited" as const });
-        }
-        if (!task.enabled) {
-          yield* log("disabled");
-          return { _tag: "disabled" as const };
-        }
-        const signature = task.schedule.signature;
-        if (signature !== null) {
-          const verified =
-            row.webhook_secret !== null &&
-            verifyWebhookSignature({
-              signature,
-              secret: row.webhook_secret,
-              headers: request.headers,
-              body: request.body,
+            // Only the first rejected request in a window is logged, so a flood
+            // cannot write rows or push the real deliveries out of the log.
+            const slot = yield* takeRateSlot(task.id, DateTime.toEpochMillis(now));
+            if (slot !== "allowed") {
+              if (slot === "first_rejected") yield* log("rate_limited");
+              return yield* releaseClaim({ _tag: "rate_limited" as const });
+            }
+            if (!task.enabled) {
+              yield* log("disabled");
+              return { _tag: "disabled" as const };
+            }
+            const signature = schedule.signature;
+            if (signature !== null) {
+              const verified =
+                row.webhook_secret !== null &&
+                verifyWebhookSignature({
+                  signature,
+                  secret: row.webhook_secret,
+                  headers: request.headers,
+                  body: request.body,
+                });
+              if (!verified) {
+                yield* log("rejected_signature");
+                return { _tag: "rejected_signature" as const };
+              }
+            }
+            const maxAgeMinutes = schedule.maxDeliveryAgeMinutes ?? null;
+            if (
+              maxAgeMinutes !== null &&
+              DateTime.toEpochMillis(now) - DateTime.toEpochMillis(receivedAt) >
+                maxAgeMinutes * 60_000
+            ) {
+              yield* log("expired", { signatureVerified: signature !== null });
+              return { _tag: "expired" as const };
+            }
+
+            const rendered = renderWebhookPrompt(task.prompt, request);
+            // Bound the deliveries one task holds, so steady traffic to a stuck
+            // task cannot pile up parked fibers. A refused request is not logged,
+            // so it cannot push real deliveries out of the log.
+            const queueKey = `${task.id}\u0000${task.createdAt}`;
+            const queued = yield* Ref.modify(webhookQueued, (counts) => {
+              const count = counts.get(queueKey) ?? 0;
+              return count >= WEBHOOK_MAX_QUEUED_PER_TASK
+                ? ([false, counts] as const)
+                : ([true, new Map(counts).set(queueKey, count + 1)] as const);
             });
-          if (!verified) {
-            yield* log("rejected_signature");
-            return { _tag: "rejected_signature" as const };
-          }
-        }
-        const maxAgeMinutes = task.schedule.maxDeliveryAgeMinutes ?? null;
-        if (
-          maxAgeMinutes !== null &&
-          DateTime.toEpochMillis(now) - DateTime.toEpochMillis(receivedAt) > maxAgeMinutes * 60_000
-        ) {
-          yield* log("expired", { signatureVerified: signature !== null });
-          return { _tag: "expired" as const };
-        }
-
-        const rendered = renderWebhookPrompt(task.prompt, request);
-        // Bound the deliveries one task holds, so steady traffic to a stuck
-        // task cannot pile up parked fibers. A refused request is not logged,
-        // so it cannot push real deliveries out of the log.
-        const queueKey = `${task.id}\u0000${task.createdAt}`;
-        const queued = yield* Ref.modify(webhookQueued, (counts) => {
-          const count = counts.get(queueKey) ?? 0;
-          return count >= WEBHOOK_MAX_QUEUED_PER_TASK
-            ? ([false, counts] as const)
-            : ([true, new Map(counts).set(queueKey, count + 1)] as const);
-        });
-        if (!queued) return yield* releaseClaim({ _tag: "rate_limited" as const });
-        // Entries leave the map when their count reaches zero, so a deleted
-        // task's key does not linger once its last delivery finishes.
-        const release = Ref.update(webhookQueued, (counts) => {
-          const next = new Map(counts);
-          const count = (next.get(queueKey) ?? 1) - 1;
-          if (count <= 0) next.delete(queueKey);
-          else next.set(queueKey, count);
-          return next;
-        });
-        yield* log("accepted", {
-          signatureVerified: signature !== null,
-          missing: rendered.missing,
-          renderedPrompt: rendered.prompt,
-        }).pipe(Effect.onError(() => release));
-        const permit = yield* webhookPermit(task.id);
-        yield* runTask(task, "webhook", { deliveryId, prompt: rendered.prompt }).pipe(
-          Effect.flatMap((completed) =>
-            completed.lastRunStatus === "failed"
-              ? markDeliveryFailed(deliveryId, "The run failed to start.")
-              : Effect.void,
-          ),
-          Effect.catchTag("WebhookDeliverySkipped", (skipped) =>
-            markDeliveryFailed(deliveryId, skipped.reason),
-          ),
-          // The log is readable over RPC, so it gets a fixed reason; the
-          // cause, which can carry request data, stays in the server log.
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Webhook dispatch failed", { taskId: task.id, cause }).pipe(
-              Effect.andThen(markDeliveryFailed(deliveryId, "The run failed to start.")),
-            ),
-          ),
-          permit.withPermits(1),
-          Effect.ensuring(release),
-          Effect.forkIn(serviceScope),
+            if (!queued) return yield* releaseClaim({ _tag: "rate_limited" as const });
+            // Entries leave the map when their count reaches zero, so a deleted
+            // task's key does not linger once its last delivery finishes.
+            const release = Ref.update(webhookQueued, (counts) => {
+              const next = new Map(counts);
+              const count = (next.get(queueKey) ?? 1) - 1;
+              if (count <= 0) next.delete(queueKey);
+              else next.set(queueKey, count);
+              return next;
+            });
+            yield* log("accepted", {
+              signatureVerified: signature !== null,
+              missing: rendered.missing,
+              renderedPrompt: rendered.prompt,
+            }).pipe(Effect.onError(() => release));
+            const permit = yield* webhookPermit(task.id);
+            yield* runTask(task, "webhook", { deliveryId, prompt: rendered.prompt }).pipe(
+              Effect.flatMap((completed) =>
+                completed.lastRunStatus === "failed"
+                  ? markDeliveryFailed(deliveryId, "The run failed to start.")
+                  : Effect.void,
+              ),
+              Effect.catchTag("WebhookDeliverySkipped", (skipped) =>
+                markDeliveryFailed(deliveryId, skipped.reason),
+              ),
+              // The log is readable over RPC, so it gets a fixed reason; the
+              // cause, which can carry request data, stays in the server log.
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Webhook dispatch failed", { taskId: task.id, cause }).pipe(
+                  Effect.andThen(markDeliveryFailed(deliveryId, "The run failed to start.")),
+                ),
+              ),
+              permit.withPermits(1),
+              Effect.ensuring(release),
+              Effect.forkIn(serviceScope),
+            );
+            return { _tag: "accepted" as const, deliveryId };
+          }),
         );
-        return { _tag: "accepted" as const, deliveryId };
       });
 
     return ScheduledTaskService.of({
