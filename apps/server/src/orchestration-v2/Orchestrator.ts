@@ -8009,6 +8009,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         mapDispatchError(command),
       );
 
+  /** Records Stop for a run without replacing a marker already written by its interrupt. */
+  const markStoppedRun = Effect.fnUntraced(function* (input: {
+    readonly command: Extract<
+      OrchestrationV2ServerCommand,
+      { readonly type: "run.interrupt" | "thread.stop" }
+    >;
+    readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+    readonly thread: OrchestrationV2AppThread;
+    readonly run: OrchestrationV2Run;
+    readonly now: DateTime.Utc;
+  }) {
+    const { command, events, thread, run, now } = input;
+    if (run.rootNodeId === null || run.providerThreadId === null) return;
+    const pendingItems = (yield* Ref.get(events)).flatMap((event) =>
+      event.type === "turn-item.updated" ? [event.payload] : [],
+    );
+    if (
+      pendingItems.some((item) => item.runId === run.id && item.type === "run_interrupt_request") ||
+      (yield* stopReachedRun(command, thread.id, run.id))
+    ) {
+      return;
+    }
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "turn-item.updated",
+      threadId: thread.id,
+      runId: run.id,
+      nodeId: run.rootNodeId,
+      providerInstanceId: run.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        id: idAllocator.derive.runSignalTurnItem({ runId: run.id, signal: "interrupt-request" }),
+        threadId: thread.id,
+        runId: run.id,
+        nodeId: run.rootNodeId,
+        providerThreadId: run.providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: yield* nextTurnItemOrdinal({ thread, turnItems: pendingItems }),
+        status: "completed",
+        title: "Interrupt requested",
+        startedAt: now,
+        completedAt: now,
+        updatedAt: now,
+        type: "run_interrupt_request",
+        message: command.reason ?? "Interrupt requested",
+      },
+    });
+  });
+
   /**
    * What Stop holds besides the run it interrupts: queued runs wait for the user, the
    * thread's pull request watches end, and every wake its delegated tasks still owe is
@@ -8016,7 +8069,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * `cohortRunIds` are dropped even when they owe nothing, like a plain interrupt's.
    */
   const holdStoppedThread = (input: {
-    readonly command: OrchestrationV2ServerCommand;
+    readonly command: Extract<
+      OrchestrationV2ServerCommand,
+      { readonly type: "run.interrupt" | "thread.stop" }
+    >;
     readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
     readonly projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "subagents">;
     readonly cohortRunIds: ReadonlyArray<RunId>;
@@ -8026,6 +8082,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const emitEvent = emit(input.events, input.command);
       const { thread, runs, subagents } = input.projection;
       for (const run of runs) {
+        // A resumed queue can have a lower ordinal than a pending continuation source.
+        // Stop must reach those sources even when interrupting the resumed run succeeds.
+        if (
+          run.status === "cancelled" &&
+          (yield* awaitsRestartContinuation(run).pipe(mapDispatchError(input.command)))
+        ) {
+          yield* markStoppedRun({ ...input, thread, run });
+        }
         if (run.status !== "queued" || run.queueHeld === true) continue;
         yield* emitEvent({
           type: "run.updated",
@@ -8592,63 +8656,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
       const now = yield* DateTime.now;
       // Record that Stop reached the turn it could not interrupt and the thread's last executed
-      // run, so a late tool call from their agent starts nothing, and every run a restart cut,
-      // so its continuation never starts.
+      // run, so a late tool call from their agent starts nothing.
       const executed = latestExecutedRun(projection.runs);
       const reached = new Map<RunId, OrchestrationV2Run>();
       if (target !== undefined) reached.set(target.id, target);
       if (executed !== null && !hasLiveRun({ runs: [executed] }))
         reached.set(executed.id, executed);
-      for (const run of projection.runs) {
-        if (
-          run.status === "cancelled" &&
-          (executed === null || run.ordinal >= executed.ordinal) &&
-          (yield* awaitsRestartContinuation(run).pipe(mapDispatchError(command)))
-        ) {
-          reached.set(run.id, run);
-        }
-      }
-      let ordinal = yield* nextTurnItemOrdinal(projection);
       for (const run of reached.values()) {
-        if (
-          run.rootNodeId === null ||
-          run.providerThreadId === null ||
-          (yield* stopReachedRun(command, command.threadId, run.id))
-        ) {
-          continue;
-        }
-        yield* emit(
-          events,
-          command,
-        )({
-          type: "turn-item.updated",
-          threadId: command.threadId,
-          runId: run.id,
-          nodeId: run.rootNodeId,
-          providerInstanceId: run.providerInstanceId,
-          occurredAt: now,
-          payload: {
-            id: idAllocator.derive.runSignalTurnItem({
-              runId: run.id,
-              signal: "interrupt-request",
-            }),
-            threadId: command.threadId,
-            runId: run.id,
-            nodeId: run.rootNodeId,
-            providerThreadId: run.providerThreadId,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: ordinal++,
-            status: "completed",
-            title: "Interrupt requested",
-            startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-            type: "run_interrupt_request",
-            message: command.reason ?? "Interrupt requested",
-          },
-        });
+        yield* markStoppedRun({ command, events, thread: projection.thread, run, now });
       }
       yield* holdStoppedThread({ command, events, projection, cohortRunIds: [], now });
       return undefined;
