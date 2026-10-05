@@ -61,16 +61,18 @@ using its project, model, and workspace settings. Fixed-time schedules use that
 environment's time zone, which may differ from your phone's.
 
 You can edit, pause, resume, run immediately, or delete a task from the list.
+Webhook tasks only run when their URL is called, so they can't be run
+immediately.
 Leaving an edited form asks before discarding unsaved changes.
 
 ## Webhook automations
 
-In **Settings → Scheduled tasks**, choose **On webhook** as a task's schedule to run it whenever another service
-calls its URL, such as GitHub on a new pull request or a CI job that failed.
-After you save the task, copy its URL from the editor. If the environment uses a
-[T3 Connect](remote-access.md) managed tunnel, the URL is public; otherwise it
-works anywhere the environment itself is reachable. **Rotate** replaces the URL and
-the old one stops working.
+In **Settings → Scheduled tasks**, choose **On webhook** (**Webhook** on mobile)
+as a task's schedule to run it whenever another service calls its URL, such as
+GitHub on a new pull request or a CI job that failed. A public URL needs a
+[T3 Connect](remote-access.md) managed tunnel; after you save the task, copy
+its URL from the editor. Without one, the editor shows only the URL's path.
+**Rotate** replaces the URL and the old one stops working.
 
 The prompt decides what the agent sees. Placeholders pull values out of the
 request: `{{body.path}}` for a JSON or form field, `{{headers.name}}`,
@@ -81,7 +83,9 @@ pull request link. A placeholder with no value is left empty.
 For GitHub, turn on **Require signature**, keep the header
 `x-hub-signature-256`, hex encoding and the `sha256=` prefix, and enter the
 same secret in the repository's webhook settings with content type
-`application/json`. Requests without a valid signature are rejected.
+`application/json`. Requests without a valid signature are rejected. Set this
+up on desktop or web; mobile keeps an existing signature check but can't turn
+one on.
 
 On desktop and web, pick **Deliveries** from a task's menu to see recent
 requests and the prompt each one produced.
