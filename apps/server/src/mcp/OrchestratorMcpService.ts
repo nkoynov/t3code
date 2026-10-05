@@ -1683,14 +1683,15 @@ const make = Effect.gen(function* () {
                 ),
               ),
             );
+          // A retry with the same clientRequestId repeats only the stops that failed.
           yield* threadManagement
             .stopDelegatedTasks({ threadId: current.childThreadId, commandId, reason })
             .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("orchestrator-mcp.cancel-task.delegated-stop-failed", {
-                  taskId: input.taskId,
-                  cause,
-                }),
+              Effect.mapError((error) =>
+                failure(
+                  "task_not_cancellable",
+                  `Stopped delegated task ${input.taskId}, but not every task it delegated: ${errorMessage(error)}`,
+                ),
               ),
             );
         });

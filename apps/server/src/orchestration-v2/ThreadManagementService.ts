@@ -325,8 +325,8 @@ export interface ThreadManagementServiceShape {
   ) => Effect.Effect<ThreadManagementInterruptResult, ThreadManagementFailure>;
   /**
    * Sends `thread.stop` to every delegated task under a thread, depth first. Their command IDs
-   * derive from `commandId`, so a retry repeats nothing. A task that cannot be stopped is
-   * logged and skipped, so it cannot keep the others running.
+   * derive from `commandId`, so a retry repeats nothing that already stopped. A task that
+   * cannot be stopped does not keep the others running: all are tried, then it fails.
    */
   readonly stopDelegatedTasks: (input: {
     readonly threadId: ThreadId;
@@ -734,6 +734,7 @@ const make = Effect.gen(function* () {
   const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = (input) =>
     Effect.gen(function* () {
       const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
+      const failures: Array<Orchestrator.OrchestratorV2Error> = [];
       for (const task of subagents) {
         if (task.origin !== "app_owned" || task.childThreadId === null) continue;
         const threadId = task.childThreadId;
@@ -744,15 +745,16 @@ const make = Effect.gen(function* () {
           ...(input.reason === undefined ? {} : { reason: input.reason }),
         }).pipe(
           Effect.andThen(stopDelegatedTasks({ ...input, threadId })),
-          Effect.catch((cause) =>
+          Effect.catch((error) =>
             Effect.logWarning("Unable to stop a delegated task", {
               parentThreadId: input.threadId,
               threadId,
-              cause,
-            }),
+              error,
+            }).pipe(Effect.andThen(Effect.sync(() => failures.push(error)))),
           ),
         );
       }
+      if (failures[0] !== undefined) return yield* Effect.fail(failures[0]);
     });
 
   return ThreadManagementService.of({

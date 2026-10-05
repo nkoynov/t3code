@@ -3,6 +3,7 @@ import {
   CommandId,
   EventId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -290,5 +291,43 @@ it.effect("a run that is stopping cannot delegate or start a pull request watch"
     assert.isTrue(Exit.isFailure(yield* Effect.exit(delegate(threadId, "late task"))));
     assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 5))));
     assert.deepEqual(yield* threadState(threadId), { runs: ["starting"], watched: [4] });
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("a delegated task that cannot be stopped fails the walk after its siblings stop", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const parentThreadId = ThreadId.make("thread:stop-partial");
+    yield* createWatchingThread(parentThreadId, 6);
+    yield* send(parentThreadId, "work", "start_immediately");
+    const childThreadId = yield* delegate(parentThreadId, "stoppable task");
+    const task = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents[0]!;
+    // A task whose thread is gone, listed before the one that can stop.
+    yield* projections.apply({
+      id: EventId.make("event:stop-partial:missing-task"),
+      type: "subagent.updated",
+      threadId: parentThreadId,
+      runId: task.runId!,
+      nodeId: NodeId.make("node:stop-partial:missing"),
+      providerInstanceId: instanceId,
+      occurredAt: yield* DateTime.now,
+      payload: {
+        ...task,
+        id: NodeId.make("node:stop-partial:missing"),
+        childThreadId: ThreadId.make("thread:stop-partial:missing"),
+        startedAt: DateTime.subtract(task.startedAt!, { hours: 1 }),
+      },
+    });
+
+    const walked = yield* Effect.exit(
+      threads.stopDelegatedTasks({
+        threadId: parentThreadId,
+        commandId: CommandId.make("stop-partial"),
+      }),
+    );
+    assert.isTrue(Exit.isFailure(walked));
+    assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted"]);
   }).pipe(Effect.provide(testLayer)),
 );
