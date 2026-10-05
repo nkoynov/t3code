@@ -1520,8 +1520,9 @@ export const layer = Layer.effect(
 
             const rendered = renderWebhookPrompt(task.prompt, request);
             // A provider refuses a turn this long, so it is not started. The
-            // delivery is not retryable, so the claim is kept.
-            if (rendered.prompt.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+            // delivery is not retryable, so the claim is kept. Providers trim
+            // the prompt before checking, so whitespace around it is free.
+            if (rendered.prompt.trim().length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
               yield* log("dispatch_failed", {
                 signatureVerified: signature !== null,
                 missing: rendered.missing,

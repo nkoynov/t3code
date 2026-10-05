@@ -494,6 +494,21 @@ it.effect("logs a body's first 64 KiB by bytes, not characters", () =>
   ),
 );
 
+it.effect("counts the prompt as the provider does, without surrounding whitespace", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* webhookTaskInput({ prompt: "{{body.text}}" }));
+      // Over the limit as sent, within it once the padding is trimmed.
+      const text = `{"text":"${" ".repeat(1_000)}${"x".repeat(119_990)}${"\\n".repeat(1_000)}"}`;
+      const result = yield* service.triggerWebhook(
+        requestFor(task, { body: new TextEncoder().encode(text), bodyText: text }),
+      );
+      assert.equal(result._tag, "accepted");
+      yield* Queue.take(launches);
+    }),
+  ),
+);
+
 it.effect("does not start a run when the filled-in prompt is too long", () =>
   withService(({ service, launches }) =>
     Effect.gen(function* () {
