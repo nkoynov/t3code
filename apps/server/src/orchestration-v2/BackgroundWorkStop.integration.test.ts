@@ -41,7 +41,10 @@ const modelSelection = { instanceId, model: "test-model" };
 // Codex turns leave commands running, then the thread moves to another
 // provider thread (a provider switch). Stop on the newer, settled run must
 // reach both provider threads and end all of the Codex work.
-const stopEarlierBackgroundWork = (failedStart: boolean) =>
+const stopEarlierBackgroundWork = (
+  failedStart: boolean,
+  stopWithQueue?: "thread.stop" | "run.interrupt",
+) =>
   Effect.scoped(
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace("background-work-stop");
@@ -440,12 +443,73 @@ const stopEarlierBackgroundWork = (failedStart: boolean) =>
           });
         }
 
-        yield* orchestrator.dispatch({
-          type: "run.interrupt",
-          commandId: CommandId.make("stop-background-work"),
-          threadId,
-          runId: failedStart ? failedRun.runId : latestRun.runId,
-        });
+        if (stopWithQueue !== undefined) {
+          const owner = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+            (run) => run.id === latestRun.runId,
+          )!;
+          // A message queues while checkpointing finishes, then the user holds the queue.
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("latest-run-waiting"),
+                type: "run.updated",
+                threadId,
+                runId: owner.id,
+                occurredAt: now,
+                payload: { ...owner, status: "waiting", completedAt: null },
+              },
+            ],
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("queue-follow-up"),
+            threadId,
+            messageId: MessageId.make("message:queue-follow-up"),
+            text: "Follow up after the background work",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+          assert.equal(queued.status, "queued");
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("queue-held"),
+                type: "run.updated",
+                threadId,
+                runId: queued.id,
+                occurredAt: now,
+                payload: { ...queued, queueHeld: true },
+              },
+              {
+                id: EventId.make("latest-run-settled"),
+                type: "run.updated",
+                threadId,
+                runId: owner.id,
+                occurredAt: now,
+                payload: owner,
+              },
+            ],
+          });
+        }
+
+        yield* orchestrator.dispatch(
+          stopWithQueue === "thread.stop"
+            ? {
+                type: "thread.stop",
+                commandId: CommandId.make("stop-background-work"),
+                threadId,
+              }
+            : {
+                type: "run.interrupt",
+                commandId: CommandId.make("stop-background-work"),
+                threadId,
+                runId: failedStart ? failedRun.runId : latestRun.runId,
+                ...(stopWithQueue === undefined ? {} : { holdQueue: true }),
+              },
+        );
         yield* worker.drain();
 
         // Stop reaches both provider threads. The Codex one is interrupted at
@@ -459,6 +523,11 @@ const stopEarlierBackgroundWork = (failedStart: boolean) =>
           ],
         );
         const after = yield* orchestrator.getThreadProjection(threadId);
+        if (stopWithQueue !== undefined) {
+          assert.equal(after.runs.at(-1)?.status, "queued");
+          assert.equal(after.runs.at(-1)?.queueHeld, true);
+          assert.lengthOf(started, 1);
+        }
         assert.deepEqual(
           [devServerId, watcherId, reviewerId].map(
             (id) => after.turnItems.find((item) => item.id === id)?.status,
@@ -484,4 +553,9 @@ it.effect("Stop reaches background work an earlier provider thread still runs", 
 it.effect(
   "Stop reaches earlier background work after the newest run fails before provider start",
   () => stopEarlierBackgroundWork(true),
+);
+
+it.effect.each(["thread.stop", "run.interrupt"] as const)(
+  "%s stops background work when a later message is queued",
+  (stopType) => stopEarlierBackgroundWork(false, stopType),
 );

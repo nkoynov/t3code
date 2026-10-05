@@ -8227,7 +8227,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? undefined
           : projection.providerThreads.find((candidate) => candidate.id === run?.providerThreadId);
       const hasBackgroundWork =
-        run?.id === projection.runs.at(-1)?.id &&
+        run?.id === projection.runs.findLast((candidate) => candidate.status !== "queued")?.id &&
         derivePendingBackgroundWork({
           latestRun: run,
           providerThreads: projection.providerThreads,
@@ -8608,7 +8608,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ),
         );
       if (projection.thread.deletedAt !== null) return undefined;
-      const latestRun = projection.runs.at(-1);
+      // Queued messages never started and cannot own background work.
+      const latestRun = projection.runs.findLast((run) => run.status !== "queued");
       const target =
         projection.runs.findLast(
           (run) =>
