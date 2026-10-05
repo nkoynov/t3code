@@ -919,6 +919,7 @@ function TaskForm({
                   : draft.task
               }
               signatureConfigured={draft.schedule.signature !== null}
+              disabled={saving || environmentUnavailable}
             />
             <FormField
               label="Skip requests older than (minutes)"
@@ -991,11 +992,14 @@ function WebhookScheduleDetails({
   environmentId,
   task,
   signatureConfigured,
+  disabled,
 }: {
   readonly environmentId: EnvironmentId;
   readonly task: ScheduledTask | null;
   readonly signatureConfigured: boolean;
+  readonly disabled: boolean;
 }) {
+  const [rotating, setRotating] = useState(false);
   const rotate = useAtomCommand(serverEnvironment.rotateScheduledTaskWebhookToken, {
     label: "scheduled task rotate webhook token",
     reportFailure: false,
@@ -1040,27 +1044,34 @@ function WebhookScheduleDetails({
           )}
           <Pressable
             accessibilityRole="button"
+            accessibilityState={{ disabled: disabled || rotating }}
+            disabled={disabled || rotating}
             onPress={() =>
               Alert.alert("Rotate URL?", "The current URL stops working immediately.", [
                 { text: "Cancel", style: "cancel" },
                 {
                   text: "Rotate",
                   style: "destructive",
-                  onPress: () =>
+                  onPress: () => {
+                    setRotating(true);
                     void rotate({ environmentId, input: { id: task.id } }).then((result) => {
+                      setRotating(false);
                       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
                         Alert.alert(
                           "Could not rotate URL",
                           String(squashAtomCommandFailure(result)),
                         );
                       }
-                    }),
+                    });
+                  },
                 },
               ])
             }
-            className="min-h-11 justify-center active:opacity-70"
+            className="min-h-11 justify-center active:opacity-70 disabled:opacity-50"
           >
-            <Text className="text-base text-danger-foreground">Rotate URL</Text>
+            <Text className="text-base text-danger-foreground">
+              {rotating ? "Rotating…" : "Rotate URL"}
+            </Text>
           </Pressable>
         </>
       )}
