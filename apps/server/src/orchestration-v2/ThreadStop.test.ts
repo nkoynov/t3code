@@ -252,15 +252,23 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("a run that is stopping cannot delegate or start a pull request watch", () =>
+it.effect("a run Stop reached cannot delegate or start a watch, even after it ends", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const threadId = ThreadId.make("thread:stop-barrier");
     yield* createWatchingThread(threadId, 4);
     yield* send(threadId, "work", "start_immediately");
-    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
     const now = yield* DateTime.now;
+    const run = { ...(yield* orchestrator.getThreadProjection(threadId)).runs[0]!, startedAt: now };
+    yield* projections.apply({
+      id: EventId.make("event:stop-barrier:running"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "running" },
+    });
     // Stop reached the run, but its provider has not stopped it yet.
     yield* projections.apply({
       id: EventId.make("event:stop-barrier:interrupt-request"),
@@ -290,7 +298,70 @@ it.effect("a run that is stopping cannot delegate or start a pull request watch"
 
     assert.isTrue(Exit.isFailure(yield* Effect.exit(delegate(threadId, "late task"))));
     assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 5))));
-    assert.deepEqual(yield* threadState(threadId), { runs: ["starting"], watched: [4] });
+
+    // A slow watch_pull_request call can land after the stopped run ended.
+    yield* projections.apply({
+      id: EventId.make("event:stop-barrier:interrupted"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "interrupted", completedAt: now },
+    });
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 5))));
+    assert.deepEqual(yield* threadState(threadId), { runs: ["interrupted"], watched: [4] });
+
+    // The user can still stop and restart a watch by hand.
+    for (const watching of [false, true]) {
+      yield* orchestrator.dispatch({
+        type: "thread.pull-request.watch",
+        commandId: CommandId.make(`manual-watch:${watching}`),
+        threadId,
+        ...pullRequest(4),
+        watching,
+      });
+    }
+    assert.deepEqual((yield* threadState(threadId)).watched, [4]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("thread.stop keeps a restart continuation of the stopped run from starting", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:stop-restart");
+    yield* createWatchingThread(threadId, 8);
+    yield* send(threadId, "work", "start_immediately");
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    // A server restart cut the run; its continuation is still pending.
+    yield* projections.apply({
+      id: EventId.make("event:stop-restart:cancelled"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "cancelled", startedAt: now, completedAt: now },
+    });
+
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop-restart"),
+      threadId,
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("restart-continuation"),
+      threadId,
+      messageId: MessageId.make("message:restart-continuation"),
+      text: "Continue.",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "agent",
+      creationSource: "server",
+      restartContinuationOfRunId: run.id,
+    });
+    assert.deepEqual(yield* threadState(threadId), { runs: ["cancelled"], watched: [] });
   }).pipe(Effect.provide(testLayer)),
 );
 
