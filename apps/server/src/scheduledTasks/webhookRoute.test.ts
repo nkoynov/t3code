@@ -158,16 +158,20 @@ describe("webhook route", () => {
     }
   });
 
-  it("hides service failures behind a 500", async () => {
-    const { handler, dispose } = handlerFor(() =>
+  it("hides service failures and defects behind a fixed 500", async () => {
+    const failures = [
       Effect.fail(new ScheduledTaskError({ message: "database locked" })),
-    );
-    try {
-      const response = await handler(post("/api/hooks/id/tok", "{}"));
-      expect(response.status).toBe(500);
-      expect(await response.text()).not.toContain("database");
-    } finally {
-      await dispose();
+      Effect.die(new Error("database exploded")),
+    ];
+    for (const failure of failures) {
+      const { handler, dispose } = handlerFor(() => failure);
+      try {
+        const response = await handler(post("/api/hooks/id/tok", "{}"));
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: "internal_error" });
+      } finally {
+        await dispose();
+      }
     }
   });
 });

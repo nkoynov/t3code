@@ -74,7 +74,8 @@ const handleWebhook =
           ...(relayReceivedAt ? { receivedAt: relayReceivedAt } : {}),
         })
         .pipe(
-          Effect.catch((cause) =>
+          // Defects too, so the sender only ever sees the fixed error body.
+          Effect.catchCause((cause) =>
             Effect.logWarning("Webhook delivery failed").pipe(
               Effect.annotateLogs({ hookId: params.hookId }),
               Effect.andThen(Effect.logDebug("Webhook delivery failure cause", { cause })),
