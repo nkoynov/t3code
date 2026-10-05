@@ -151,6 +151,24 @@ describe("HookInboxStore", () => {
     ),
   );
 
+  it.effect("starts the schedule over once the inbox drains", () =>
+    withInbox(
+      Effect.gen(function* () {
+        yield* HookInboxStore.hold(yield* hook("old"), BASE_URL);
+        const offline = deliverer(() => "unreachable");
+        for (let failure = 0; failure < 30; failure++) {
+          yield* HookInboxStore.deliverDue(offline.send);
+        }
+        // Nothing got through before the request expired.
+        yield* TestClock.adjust(Duration.hours(25));
+        expect(yield* HookInboxStore.deliverDue(offline.send)).toBeNull();
+
+        const now = yield* Clock.currentTimeMillis;
+        expect(yield* HookInboxStore.hold(yield* hook("new"), BASE_URL)).toBe(now + 10_000);
+      }),
+    ),
+  );
+
   it.effect("drops requests older than 24 hours", () =>
     withInbox(
       Effect.gen(function* () {

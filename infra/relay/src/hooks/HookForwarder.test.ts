@@ -258,8 +258,21 @@ describe("HookForwarder", () => {
       expect(response.headers["content-type"]).toBe("application/json");
       expect(response.headers["set-cookie"]).toBeUndefined();
       expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+      // Served from the relay's origin, so it may never render or run there.
+      expect(response.headers["x-content-type-options"]).toBe("nosniff");
+      expect(response.headers["content-security-policy"]).toBe("sandbox; default-src 'none'");
       expect(new TextDecoder().decode(yield* readBody(response))).toBe('{"error":"bad_signature"}');
       expect(harness.sent[0]?.method).toBe("GET");
+    }),
+  );
+
+  it.effect("never forwards or holds HEAD, which can carry no body", () =>
+    Effect.gen(function* () {
+      const harness = makeHarness({ execute: () => Effect.die("must not be sent") });
+      const response = yield* harness.send(new Request(hookUrl(), { method: "HEAD" }));
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(response.status).toBeLessThan(500);
+      expect(harness.held).toHaveLength(0);
     }),
   );
 

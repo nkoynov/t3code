@@ -49,7 +49,9 @@ export class HookInboxObject extends Cloudflare.DurableObject<
 const withInboxSpan =
   (name: string, inboxId: string) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    effect.pipe(Effect.withSpan(name, { root: true, attributes: { "relay.inbox.id": inboxId } }));
+    effect.pipe(
+      Effect.withSpan(name, { root: true, attributes: { "relay.hook.endpoint_key": inboxId } }),
+    );
 
 const deliver = (baseUrl: string, hook: HookInboxStore.HeldHook) =>
   sendUpstream(baseUrl, hook).pipe(
@@ -91,7 +93,9 @@ export const HookInboxObjectLive = HookInboxObject.make(
     // @effect-diagnostics-next-line returnEffectInGen:off
     return Effect.gen(function* () {
       const sql = SqliteClient.layer({ storage: state.raw.storage });
-      const inboxId = state.raw.id.toString();
+      // Inboxes are opened by endpoint key, so spans line up with the
+      // forward spans that held their requests.
+      const inboxId = state.raw.id.name ?? state.raw.id.toString();
       const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(Effect.provide(sql), Effect.orDie);
       yield* run(HookInboxStore.migrate);
@@ -126,9 +130,9 @@ export const HookInboxObjectLive = HookInboxObject.make(
           }).pipe(withInboxSpan("relay.inbox.clear", inboxId)),
         alarm: () =>
           run(HookInboxStore.deliverDue(deliver)).pipe(
-            Effect.flatMap((nextAt) =>
-              nextAt === null ? Effect.void : state.storage.setAlarm(nextAt),
-            ),
+            // A wake during this run may already have asked for an earlier
+            // run; a backoff must not push it out.
+            Effect.flatMap((nextAt) => (nextAt === null ? Effect.void : scheduleBy(nextAt))),
             Effect.catchCause((cause) =>
               Effect.logWarning("Held webhook delivery run failed", { cause }).pipe(
                 Effect.andThen(Effect.annotateCurrentSpan({ "relay.inbox.run_result": "failed" })),

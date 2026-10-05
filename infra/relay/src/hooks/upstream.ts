@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as HttpMethod from "effect/unstable/http/HttpMethod";
 import type * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 
 import { withoutRedirects } from "../environments/EnvironmentConnector.ts";
@@ -86,7 +87,7 @@ export const sendUpstream = (baseUrl: string, hook: UpstreamHook) =>
       `${base}api/hooks/${hook.rawHookId}/${hook.rawToken}${hook.query ? `?${hook.query}` : ""}`,
       { headers },
     );
-    if (hook.method !== "GET") {
+    if (HttpMethod.hasBody(request.method)) {
       request = HttpClientRequest.bodyUint8Array(request, hook.body, headers["content-type"]);
     }
     return yield* httpClient.execute(request).pipe(

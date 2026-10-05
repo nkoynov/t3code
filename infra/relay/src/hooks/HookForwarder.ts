@@ -126,6 +126,18 @@ const errorResponse = (status: number, error: string, headers?: Record<string, s
 
 const hookNotFound = () => errorResponse(404, "hook_not_found");
 
+/** Methods a webhook can arrive with; HEAD reaches the GET route and is refused. */
+const FORWARDED_METHODS = new Set(["GET", "POST", "PUT", "PATCH"]);
+
+/**
+ * Whatever the environment answers is served from the relay's own origin, so
+ * a body must never render or run there.
+ */
+const SANDBOXED_RESPONSE_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "sandbox; default-src 'none'",
+} as const;
+
 function parseHookPath(url: string) {
   const queryIndex = url.indexOf("?");
   const path = queryIndex === -1 ? url : url.slice(0, queryIndex);
@@ -264,6 +276,10 @@ const make = Effect.gen(function* () {
     request: HttpServerRequest.HttpServerRequest,
   ) {
     const outcome = (value: string) => Effect.annotateCurrentSpan({ "relay.hook.outcome": value });
+    if (!FORWARDED_METHODS.has(request.method)) {
+      yield* outcome("method_not_allowed");
+      return errorResponse(405, "method_not_allowed", { allow: "GET, POST, PUT, PATCH" });
+    }
     // When the sender called, not when the environment failed to answer.
     const receivedAt = DateTime.formatIso(yield* DateTime.now);
     const parsed = parseHookPath(request.url);
@@ -399,17 +415,16 @@ const make = Effect.gen(function* () {
     });
     // Only content-type is passed through: no location (redirects are never
     // followed or relayed), no cookies, no upstream infrastructure headers.
-    const contentTypeHeaders = response.contentType
-      ? { "content-type": response.contentType }
-      : undefined;
+    const headers = {
+      ...SANDBOXED_RESPONSE_HEADERS,
+      ...(response.contentType ? { "content-type": response.contentType } : {}),
+    };
     if (response.body.length === 0) {
-      return HttpServerResponse.empty({
-        status: response.status,
-        ...(contentTypeHeaders ? { headers: contentTypeHeaders } : {}),
-      });
+      return HttpServerResponse.empty({ status: response.status, headers });
     }
     return HttpServerResponse.uint8Array(response.body, {
       status: response.status,
+      headers,
       ...(response.contentType ? { contentType: response.contentType } : {}),
     });
   });

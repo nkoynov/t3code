@@ -32,6 +32,8 @@ const ROWS_READ_PER_RUN = 200;
 /** Wait before trying a hook whose environment answered busy again. */
 const BUSY_RETRY_MS = 30_000;
 const MAX_RETRY_DELAY = Duration.minutes(10);
+/** Past this many failures the schedule is at its cap, so stepping further changes nothing. */
+const MAX_COUNTED_FAILURES = 25;
 
 /**
  * Delays between delivery attempts while the environment is unreachable,
@@ -79,7 +81,11 @@ export type DeliveryOutcome = "delivered" | "busy" | "unreachable";
 export const retryDelayMs = Effect.fn("HookInboxStore.retryDelayMs")(function* (failures: number) {
   const step = yield* Schedule.toStep(retrySchedule);
   let delay = MAX_RETRY_DELAY;
-  for (let attempt = 0; attempt < Math.max(1, failures); attempt++) {
+  for (
+    let attempt = 0;
+    attempt < Math.min(Math.max(1, failures), MAX_COUNTED_FAILURES);
+    attempt++
+  ) {
     const next = yield* step(0, undefined).pipe(
       Effect.map(([, duration]) => Option.some(duration)),
       // The schedule never ends; stay at the cap if it ever does.
@@ -161,11 +167,23 @@ const readTarget = Effect.gen(function* () {
   return rows[0] ?? null;
 });
 
-const setFailures = (failures: number) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`UPDATE held_hooks_target SET failures = ${failures} WHERE id = 1`;
-  });
+const resetFailures = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`UPDATE held_hooks_target SET failures = 0 WHERE id = 1`;
+});
+
+/**
+ * Counts one more unreachable attempt. Incremented in place, so a wake that
+ * reset the count while this run's request was in flight is not overwritten.
+ */
+const countFailure = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ readonly failures: number }>`
+    UPDATE held_hooks_target SET failures = min(failures + 1, ${MAX_COUNTED_FAILURES})
+    WHERE id = 1 RETURNING failures
+  `;
+  return rows[0]?.failures ?? 1;
+});
 
 const hasPending = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -267,6 +285,8 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   `;
   if (batch.length === 0 || target === null) {
     if (target === null) yield* sql`DELETE FROM held_hooks`;
+    // Empty, so the next request held starts the schedule from the top.
+    else yield* resetFailures;
     yield* Effect.annotateCurrentSpan({ "relay.inbox.expired": expired.length });
     return null;
   }
@@ -318,14 +338,13 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
       body: row.body,
     });
     if (outcome === "unreachable") {
-      failures += 1;
-      yield* setFailures(failures);
+      failures = yield* countFailure;
       yield* annotateRun("unreachable");
       return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(failures));
     }
     if (failures !== 0) {
       failures = 0;
-      yield* setFailures(0);
+      yield* resetFailures;
     }
     if (outcome === "busy") {
       busyHooks.add(row.hook_key);
@@ -337,6 +356,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
     longestWaitMs = Math.max(longestWaitMs, startedAt - receivedAtMs);
   }
   if (!(yield* hasPending)) {
+    yield* resetFailures;
     yield* annotateRun("drained");
     return null;
   }

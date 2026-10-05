@@ -91,5 +91,5 @@ Questions these answer:
 | extend c = ['attributes.custom']
 | where tostring(c['relay.inbox.run_result']) == 'unreachable'
 | summarize runs = count(), failures = max(toint(c['relay.inbox.consecutive_failures'])),
-    backlog = max(toint(c['relay.inbox.held_count'])) by inbox = tostring(c['relay.inbox.id'])
+    backlog = max(toint(c['relay.inbox.held_count'])) by endpoint = tostring(c['relay.hook.endpoint_key'])
 ```

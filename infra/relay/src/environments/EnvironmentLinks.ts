@@ -184,10 +184,13 @@ const make = Effect.gen(function* () {
       const { request, proof } = input;
       const environmentId = proof.environmentId;
       // The webhook-hold opt-in belongs to the environment: a new or re-made
-      // link carries it over from the environment's other active links.
+      // link carries it over from the environment's other active links. Only
+      // links proven by the same key count; an environment id is public, so
+      // anyone can link one and switch the opt-in on for their own link.
       const inheritedHoldWebhooks = sql<boolean>`EXISTS (
         SELECT 1 FROM ${relayEnvironmentLinks} AS other
         WHERE other.environment_id = ${environmentId}
+          AND other.environment_public_key = ${proof.environmentPublicKey}
           AND other.revoked_at IS NULL
           AND other.hold_webhooks_while_offline
       )`;
