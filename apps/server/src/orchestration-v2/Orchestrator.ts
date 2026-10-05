@@ -2382,7 +2382,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     // Only the agent's watch_pull_request links as "agent". A call that raced a Stop may land
-    // after its run ended, so the latest run decides. A user can still watch after a Stop.
+    // after its run ended, so the latest run that executed decides. A user can still watch.
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
@@ -2391,8 +2391,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const { runs } = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])
         .pipe(mapDispatchError(command));
-      const latest = latestDequeuedRun(runs);
-      if (latest !== undefined && (yield* stopReachedRun(command, command.threadId, latest.id))) {
+      const latest = latestExecutedRun(runs);
+      if (latest !== null && (yield* stopReachedRun(command, command.threadId, latest.id))) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -8010,15 +8010,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
 
   /**
-   * The thread's latest run that left the queue: the one an agent's tool call or a restart
-   * continuation can come from. A run a restart cut before its provider started counts.
-   */
-  const latestDequeuedRun = (runs: ReadonlyArray<OrchestrationV2Run>) =>
-    runs
-      .filter((run) => run.status !== "queued")
-      .toSorted((left, right) => right.ordinal - left.ordinal)[0];
-
-  /**
    * What Stop holds besides the run it interrupts: queued runs wait for the user, the
    * thread's pull request watches end, and every wake its delegated tasks still owe is
    * dropped, since Stop stops those tasks too. Nothing automatic starts the thread again.
@@ -8600,39 +8591,53 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
-      // Record that Stop reached the thread's finished run too. A late tool call from its
-      // agent then starts nothing, and a restart that cut it does not continue it.
-      const latest = latestDequeuedRun(projection.runs);
-      if (
-        latest !== undefined &&
-        !hasLiveRun({ runs: [latest] }) &&
-        latest.rootNodeId !== null &&
-        latest.providerThreadId !== null &&
-        !(yield* stopReachedRun(command, command.threadId, latest.id))
-      ) {
+      // Record that Stop reached the thread's last executed run, so a late tool call from its
+      // agent starts nothing, and every run a restart cut, so its continuation never starts.
+      const executed = latestExecutedRun(projection.runs);
+      const reached = new Map<RunId, OrchestrationV2Run>();
+      if (executed !== null && !hasLiveRun({ runs: [executed] }))
+        reached.set(executed.id, executed);
+      for (const run of projection.runs) {
+        if (
+          run.status === "cancelled" &&
+          (executed === null || run.ordinal >= executed.ordinal) &&
+          (yield* awaitsRestartContinuation(run).pipe(mapDispatchError(command)))
+        ) {
+          reached.set(run.id, run);
+        }
+      }
+      let ordinal = yield* nextTurnItemOrdinal(projection);
+      for (const run of reached.values()) {
+        if (
+          run.rootNodeId === null ||
+          run.providerThreadId === null ||
+          (yield* stopReachedRun(command, command.threadId, run.id))
+        ) {
+          continue;
+        }
         yield* emit(
           events,
           command,
         )({
           type: "turn-item.updated",
           threadId: command.threadId,
-          runId: latest.id,
-          nodeId: latest.rootNodeId,
-          providerInstanceId: latest.providerInstanceId,
+          runId: run.id,
+          nodeId: run.rootNodeId,
+          providerInstanceId: run.providerInstanceId,
           occurredAt: now,
           payload: {
             id: idAllocator.derive.runSignalTurnItem({
-              runId: latest.id,
+              runId: run.id,
               signal: "interrupt-request",
             }),
             threadId: command.threadId,
-            runId: latest.id,
-            nodeId: latest.rootNodeId,
-            providerThreadId: latest.providerThreadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            providerThreadId: run.providerThreadId,
             providerTurnId: null,
             nativeItemRef: null,
             parentItemId: null,
-            ordinal: yield* nextTurnItemOrdinal(projection),
+            ordinal: ordinal++,
             status: "completed",
             title: "Interrupt requested",
             startedAt: now,

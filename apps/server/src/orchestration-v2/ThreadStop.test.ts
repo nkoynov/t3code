@@ -14,10 +14,12 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { OrchestrationEffectRequestV2 } from "./EffectOutbox.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
@@ -49,6 +51,8 @@ const testLayer = ThreadManagementService.layer.pipe(
     ),
   ),
 );
+
+const encodeEffectRequest = Schema.encodeSync(Schema.fromJsonString(OrchestrationEffectRequestV2));
 
 const pullRequest = (number: number) => ({
   host: "github.com",
@@ -269,6 +273,15 @@ it.effect("a run Stop reached cannot delegate or start a watch, even after it en
       occurredAt: now,
       payload: { ...run, status: "running" },
     });
+    // A queued message the user cancelled does not count as the latest run.
+    yield* send(threadId, "queued", "queue_after_active");
+    const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+    yield* orchestrator.dispatch({
+      type: "queued-run.cancel",
+      commandId: CommandId.make("cancel-queued"),
+      threadId,
+      runId: queued.id,
+    });
     // Stop reached the run, but its provider has not stopped it yet.
     yield* projections.apply({
       id: EventId.make("event:stop-barrier:interrupt-request"),
@@ -309,7 +322,10 @@ it.effect("a run Stop reached cannot delegate or start a watch, even after it en
       payload: { ...run, status: "interrupted", completedAt: now },
     });
     assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 5))));
-    assert.deepEqual(yield* threadState(threadId), { runs: ["interrupted"], watched: [4] });
+    assert.deepEqual(yield* threadState(threadId), {
+      runs: ["interrupted", "cancelled"],
+      watched: [4],
+    });
 
     // The user can still stop and restart a watch by hand.
     for (const watching of [false, true]) {
@@ -329,6 +345,7 @@ it.effect("thread.stop keeps a restart continuation of the stopped run from star
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
     const threadId = ThreadId.make("thread:stop-restart");
     yield* createWatchingThread(threadId, 8);
     yield* send(threadId, "work", "start_immediately");
@@ -343,6 +360,18 @@ it.effect("thread.stop keeps a restart continuation of the stopped run from star
       occurredAt: now,
       payload: { ...run, status: "cancelled", startedAt: null, completedAt: now },
     });
+    const at = DateTime.formatIso(now);
+    yield* sql`
+      INSERT INTO orchestration_v2_effect_outbox (
+        effect_id, command_id, thread_id, effect_type, payload_json, status,
+        attempt_count, available_at, created_at, updated_at
+      ) VALUES (
+        ${`effect:restart-continuation:${run.id}`}, 'command:restart', ${threadId},
+        'provider-runtime.continue',
+        ${encodeEffectRequest({ type: "provider-runtime.continue", sourceRunId: run.id })},
+        'pending', 0, ${at}, ${at}, ${at}
+      )
+    `;
 
     yield* orchestrator.dispatch({
       type: "thread.stop",
