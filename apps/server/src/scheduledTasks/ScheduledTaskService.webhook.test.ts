@@ -324,35 +324,57 @@ it.effect("keeps credential headers out of the delivery log", () =>
   ),
 );
 
-it.effect("a delivery queued behind a run does not start once the task is paused", () =>
-  Effect.gen(function* () {
-    const gate = yield* Deferred.make<void>();
-    yield* withService(
-      ({ service, launches }) =>
-        Effect.gen(function* () {
-          const { task } = yield* service.upsert(yield* webhookTaskInput());
-          yield* service.triggerWebhook(requestFor(task));
-          const queued = yield* service.triggerWebhook(requestFor(task));
-          yield* Queue.take(launches);
-          yield* service.setEnabled({ id: task.id, enabled: false });
-          yield* Deferred.succeed(gate, undefined);
-          // The queued delivery is marked failed instead of launching.
-          const deliveryId = queued._tag === "accepted" ? queued.deliveryId : undefined;
-          let outcome = "accepted";
-          while (outcome === "accepted") {
-            yield* Effect.yieldNow;
-            const { delivery } = yield* service.getWebhookDelivery({
+const queuedDeliveryCases = [
+  {
+    change: "paused",
+    reason: "The task was paused before this delivery ran.",
+    apply: (service: ScheduledTaskService.ScheduledTaskService["Service"], id: string) =>
+      service.setEnabled({ id: id as never, enabled: false }),
+  },
+  {
+    change: "switched to an interval trigger",
+    reason: "The task's trigger changed before this delivery ran.",
+    apply: (service: ScheduledTaskService.ScheduledTaskService["Service"]) =>
+      webhookTaskInput({ schedule: { type: "interval", everyMs: 3_600_000 } }).pipe(
+        Effect.flatMap(service.upsert),
+      ),
+  },
+] as const;
+
+it.effect.each(queuedDeliveryCases)(
+  "a delivery queued behind a run does not start once the task is $change",
+  ({ reason, apply }) =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>();
+      yield* withService(
+        ({ service, launches }) =>
+          Effect.gen(function* () {
+            const { task } = yield* service.upsert(yield* webhookTaskInput());
+            yield* service.triggerWebhook(requestFor(task));
+            const queued = yield* service.triggerWebhook(requestFor(task));
+            yield* Queue.take(launches);
+            yield* apply(service, task.id);
+            yield* Deferred.succeed(gate, undefined);
+            // The queued delivery is marked failed instead of launching.
+            const deliveryId = queued._tag === "accepted" ? queued.deliveryId : undefined;
+            let delivery = (yield* service.getWebhookDelivery({
               id: task.id,
               deliveryId: deliveryId!,
-            });
-            outcome = delivery.outcome;
-          }
-          assert.equal(outcome, "dispatch_failed");
-          assert.equal(yield* Queue.size(launches), 0);
-        }),
-      { gate },
-    );
-  }),
+            })).delivery;
+            while (delivery.outcome === "accepted") {
+              yield* Effect.yieldNow;
+              delivery = (yield* service.getWebhookDelivery({
+                id: task.id,
+                deliveryId: deliveryId!,
+              })).delivery;
+            }
+            assert.equal(delivery.outcome, "dispatch_failed");
+            assert.equal(delivery.error, reason);
+            assert.equal(yield* Queue.size(launches), 0);
+          }),
+        { gate },
+      );
+    }),
 );
 
 it.effect("a save without a secret keeps a secret changed after it was read", () =>
