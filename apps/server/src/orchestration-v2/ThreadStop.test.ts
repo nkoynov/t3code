@@ -334,14 +334,14 @@ it.effect("thread.stop keeps a restart continuation of the stopped run from star
     yield* send(threadId, "work", "start_immediately");
     const now = yield* DateTime.now;
     const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
-    // A server restart cut the run; its continuation is still pending.
+    // A server restart cut the run before its provider started; its continuation is pending.
     yield* projections.apply({
       id: EventId.make("event:stop-restart:cancelled"),
       type: "run.updated",
       threadId,
       runId: run.id,
       occurredAt: now,
-      payload: { ...run, status: "cancelled", startedAt: now, completedAt: now },
+      payload: { ...run, status: "cancelled", startedAt: null, completedAt: now },
     });
 
     yield* orchestrator.dispatch({
@@ -400,5 +400,33 @@ it.effect("a delegated task that cannot be stopped fails the walk after its sibl
     );
     assert.isTrue(Exit.isFailure(walked));
     assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted"]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("thread.stop on a finished thread refuses a late agent watch", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:stop-finished");
+    yield* createWatchingThread(threadId, 9);
+    yield* send(threadId, "work", "start_immediately");
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    yield* projections.apply({
+      id: EventId.make("event:stop-finished:completed"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+    });
+
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop-finished"),
+      threadId,
+    });
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 10))));
+    assert.deepEqual(yield* threadState(threadId), { runs: ["completed"], watched: [] });
   }).pipe(Effect.provide(testLayer)),
 );

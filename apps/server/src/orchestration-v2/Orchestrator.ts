@@ -2391,7 +2391,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const { runs } = yield* projectionStore
         .getThreadRecords(command.threadId, ["runs"])
         .pipe(mapDispatchError(command));
-      const latest = latestStartedRun(runs);
+      const latest = latestDequeuedRun(runs);
       if (latest !== undefined && (yield* stopReachedRun(command, command.threadId, latest.id))) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -8009,10 +8009,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         mapDispatchError(command),
       );
 
-  /** The thread's latest run that started, which an agent's tool call can come from. */
-  const latestStartedRun = (runs: ReadonlyArray<OrchestrationV2Run>) =>
+  /**
+   * The thread's latest run that left the queue: the one an agent's tool call or a restart
+   * continuation can come from. A run a restart cut before its provider started counts.
+   */
+  const latestDequeuedRun = (runs: ReadonlyArray<OrchestrationV2Run>) =>
     runs
-      .filter((run) => run.startedAt !== null)
+      .filter((run) => run.status !== "queued")
       .toSorted((left, right) => right.ordinal - left.ordinal)[0];
 
   /**
@@ -8597,11 +8600,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
-      // A server restart cancels a running turn and continues it later. Recording that Stop
-      // reached the cancelled run keeps the continuation from starting.
-      const latest = latestStartedRun(projection.runs);
+      // Record that Stop reached the thread's finished run too. A late tool call from its
+      // agent then starts nothing, and a restart that cut it does not continue it.
+      const latest = latestDequeuedRun(projection.runs);
       if (
-        latest?.status === "cancelled" &&
+        latest !== undefined &&
+        !hasLiveRun({ runs: [latest] }) &&
         latest.rootNodeId !== null &&
         latest.providerThreadId !== null &&
         !(yield* stopReachedRun(command, command.threadId, latest.id))
