@@ -1,7 +1,7 @@
 import { MAX_WEBHOOK_DELIVERY_AGE_MINUTES } from "@t3tools/contracts";
 
-/** Prompt a new webhook task starts with: the whole request, which the user can narrow down. */
-export const DEFAULT_WEBHOOK_PROMPT = "Handle this webhook:\n{{request}}";
+/** Prompt a new webhook task starts with: just the body, so request headers stay out unless the user adds them. */
+export const DEFAULT_WEBHOOK_PROMPT = "Handle this webhook:\n{{body}}";
 
 /** Blank means "no limit"; undefined means the input is not a valid limit, which blocks saving. */
 export function parseMaxDeliveryAge(value: string): number | null | undefined {
