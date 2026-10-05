@@ -583,11 +583,31 @@ it.effect("logs a held request at the time the relay received it", () =>
   withService(({ service }) =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
-      yield* service.triggerWebhook(
-        requestFor(task, { relayDeliveryId: "relay-2", receivedAt: "2026-10-04T10:00:00.000Z" }),
-      );
+      const receivedAt = DateTime.formatIso(DateTime.subtract(yield* DateTime.now, { minutes: 5 }));
+      yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "relay-2", receivedAt }));
       const [delivery] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
-      assert.equal(delivery?.receivedAt, "2026-10-04T10:00:00.000Z");
+      assert.equal(delivery?.receivedAt, receivedAt);
+    }),
+  ),
+);
+
+it.effect("a receive time in the future counts as now", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({ schedule: { type: "webhook", maxDeliveryAgeMinutes: 30 } }),
+      );
+      const now = yield* DateTime.now;
+      const result = yield* service.triggerWebhook(
+        requestFor(task, {
+          relayDeliveryId: "future",
+          receivedAt: DateTime.formatIso(DateTime.add(now, { days: 365 })),
+        }),
+      );
+      assert.equal(result._tag, "accepted");
+      yield* Queue.take(launches);
+      const [delivery] = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
+      assert.equal(delivery?.receivedAt, DateTime.formatIso(now));
     }),
   ),
 );

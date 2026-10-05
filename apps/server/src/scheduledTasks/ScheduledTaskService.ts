@@ -1351,10 +1351,16 @@ export const layer = Layer.effect(
         if (schedule.type !== "webhook") return { _tag: "not_found" as const };
 
         const now = yield* localNow;
+        // Anyone can reach the tunnel directly and set the relay's header, so
+        // a receive time is never later than now: a future one would pin the
+        // delivery in the log and slip past the task's max age.
         const receivedAt =
           request.receivedAt === undefined
             ? now
-            : Option.getOrElse(DateTime.make(request.receivedAt), () => now);
+            : DateTime.min(
+                Option.getOrElse(DateTime.make(request.receivedAt), () => now),
+                now,
+              );
         const deliveryId = ScheduledTaskWebhookDeliveryId.make(
           request.relayDeliveryId === undefined
             ? `delivery:${yield* crypto.randomUUIDv4.pipe(
