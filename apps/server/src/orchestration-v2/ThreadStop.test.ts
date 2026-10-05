@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderTurnId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -457,5 +458,51 @@ it.effect("thread.stop on a finished thread refuses a late agent watch", () =>
     });
     assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 10))));
     assert.deepEqual(yield* threadState(threadId), { runs: ["completed"], watched: [] });
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("thread.stop marks a turn it cannot interrupt so a late agent watch is refused", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:stop-lost-session");
+    yield* createWatchingThread(threadId, 11);
+    yield* send(threadId, "work", "start_immediately");
+    const now = yield* DateTime.now;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    // The turn is running, but its provider session is gone, so the interrupt fails.
+    yield* projections.apply({
+      id: EventId.make("event:stop-lost-session:running"),
+      type: "run.updated",
+      threadId,
+      runId: run.id,
+      occurredAt: now,
+      payload: { ...run, status: "running", startedAt: now },
+    });
+    yield* projections.apply({
+      id: EventId.make("event:stop-lost-session:turn"),
+      type: "provider-turn.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: ProviderTurnId.make("provider-turn:stop-lost-session"),
+        providerThreadId: run.providerThreadId!,
+        nodeId: run.rootNodeId!,
+        runAttemptId: run.activeAttemptId!,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running",
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop-lost-session"),
+      threadId,
+    });
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(watch(threadId, 12))));
+    assert.deepEqual(yield* threadState(threadId), { runs: ["running"], watched: [] });
   }).pipe(Effect.provide(testLayer)),
 );

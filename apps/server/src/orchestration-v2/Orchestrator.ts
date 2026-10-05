@@ -8591,10 +8591,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
-      // Record that Stop reached the thread's last executed run, so a late tool call from its
-      // agent starts nothing, and every run a restart cut, so its continuation never starts.
+      // Record that Stop reached the turn it could not interrupt and the thread's last executed
+      // run, so a late tool call from their agent starts nothing, and every run a restart cut,
+      // so its continuation never starts.
       const executed = latestExecutedRun(projection.runs);
       const reached = new Map<RunId, OrchestrationV2Run>();
+      if (target !== undefined) reached.set(target.id, target);
       if (executed !== null && !hasLiveRun({ runs: [executed] }))
         reached.set(executed.id, executed);
       for (const run of projection.runs) {
