@@ -6,6 +6,9 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import {
+  ChatAttachmentId,
+  ChatFileAttachment,
+  ChatImageAttachment,
   CheckpointId,
   EnvironmentId,
   MessageId,
@@ -45,8 +48,10 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import {
   OPENCODE_2_STILL_STOPPING,
   OPENCODE_PROVIDER,
+  promptImageFiles,
   t3McpServerName,
 } from "@t3tools/provider-opencode/testing";
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { openCode2ReplayRuntime } from "./OpenCode2AdapterV2.testkit.ts";
 
 const SESSION = "ses_f148ca2deffeJcwCnRQtb0YFNX";
@@ -2795,6 +2800,102 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       assert.equal(yield* t3McpServerName(threadId), "t3-code-thread_opencode2-adapter");
     }).pipe(Effect.provide(NodeCrypto.layer)),
   );
+
+  it.effect("sends a turn's and a steer's pasted images as prompt files", () =>
+    Effect.gen(function* () {
+      const steerId = "msg_recorded_steer_image";
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", {
+          sessionID: SESSION,
+          text: "<any>",
+          files: [{ uri: "<any>", name: "screenshot.png" }],
+        }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        out("session.prompt", {
+          sessionID: SESSION,
+          id: steerId,
+          text: "<any>",
+          files: [{ uri: "<any>", name: "chart.png" }],
+          delivery: "steer",
+        }),
+        replyData("session.prompt", {
+          id: steerId,
+          sessionID: SESSION,
+          time: { created: 1790656601500 },
+          type: "user",
+          payload: { text: "And this one?" },
+          delivery: "steer",
+        }),
+        event("session.inbox.delivered", { sessionID: SESSION, inboxID: steerId }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const image = (name: string, id: string) =>
+        ChatImageAttachment.make({
+          type: "image",
+          id: ChatAttachmentId.make(`thread-opencode2-adapter-${id}-1234-1234-1234-123456789abc`),
+          name,
+          mimeType: "image/png",
+          sizeBytes: 4,
+        });
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      const input = turnInput(thread);
+      yield* runtime.startTurn({
+        ...input,
+        message: {
+          ...input.message,
+          text: "What's in this image?",
+          attachments: [image("screenshot.png", "12345678")],
+        },
+      });
+      yield* runtime.steerTurn({
+        threadId,
+        runId: input.runId,
+        providerThread: thread,
+        providerTurnId: ids.derive.providerTurn({
+          driver: OPENCODE_PROVIDER,
+          nativeTurnId: `${SESSION}:attempt:attempt:opencode2-adapter`,
+        }),
+        message: {
+          ...input.message,
+          messageId: MessageId.make("message:opencode2-adapter:steer"),
+          text: "And this one?",
+          attachments: [image("chart.png", "abcdefab")],
+        },
+      });
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+  );
+
+  it("gives OpenCode a file URL for each pasted image and leaves other attachments as paths", () => {
+    const image = ChatImageAttachment.make({
+      type: "image",
+      id: ChatAttachmentId.make("thread-opencode2-adapter-12345678-1234-1234-1234-123456789abc"),
+      name: "screen shot.png",
+      mimeType: "image/png",
+      sizeBytes: 4,
+    });
+    const document = ChatFileAttachment.make({
+      type: "file",
+      id: ChatAttachmentId.make("thread-opencode2-adapter-abcdefab-1234-1234-1234-123456789abc"),
+      name: "requirements.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 4,
+    });
+    const attachmentsDir = "/home/a user/.t3/userdata/attachments";
+    assert.deepEqual(
+      promptImageFiles([image, document], (attachment) =>
+        resolveAttachmentPath({ attachmentsDir, attachment }),
+      ),
+      [
+      {
+        uri: "file:///home/a%20user/.t3/userdata/attachments/thread-opencode2-adapter-12345678-1234-1234-1234-123456789abc.png",
+        name: "screen shot.png",
+      },
+      ],
+    );
+  });
 
   it.effect("reads user and assistant text from the session's message list", () =>
     Effect.gen(function* () {

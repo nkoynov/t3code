@@ -21,6 +21,7 @@
  *
  * @module orchestration-v2/Adapters/OpenCode2AdapterV2
  */
+import * as NodeURL from "node:url";
 
 import {
   AbsolutePath,
@@ -38,6 +39,7 @@ import {
 import { Mcp } from "@opencode/schema/mcp";
 import {
   isOrchestrationV2WorkActive,
+  type ChatAttachment,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
@@ -82,7 +84,10 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@t3tools/shared/model";
 import { causeErrorTag } from "@t3tools/shared/observability";
 
-import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
+import {
+  isProviderNativeImageAttachment,
+  providerMessageTextWithAttachmentPaths,
+} from "@t3tools/provider-core/server/attachmentPrompt";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   backgroundWorkNotification,
@@ -800,6 +805,20 @@ const skillsNamed = (text: string, known: ReadonlySet<string>) => [
     ),
   ),
 ];
+
+/**
+ * A message's pasted images as prompt files, which OpenCode reads from T3's
+ * attachment directory and gives the model as images. The prompt text still
+ * names where each one is saved, as with 1.x.
+ */
+export const promptImageFiles = (
+  attachments: ReadonlyArray<ChatAttachment>,
+  resolveAttachmentPath: (attachment: ChatAttachment) => string | null,
+) =>
+  attachments.filter(isProviderNativeImageAttachment).flatMap((attachment) => {
+    const path = resolveAttachmentPath(attachment);
+    return path === null ? [] : [{ uri: NodeURL.pathToFileURL(path).href, name: attachment.name }];
+  });
 
 /**
  * The turn's own tokens: steps add up, and the last step's input is the live
@@ -3554,12 +3573,14 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ),
           )
         : [];
+      const files = promptImageFiles(turnInput.message.attachments, host.resolveAttachmentPath);
       if (!sending()) return;
       return yield* client.session
         .prompt({
           sessionID,
           id,
           text: promptText(turnInput),
+          ...(files.length === 0 ? {} : { files }),
           ...(skills.length === 0
             ? {}
             : { skills: skills.map((id) => ({ id: Skill.ID.make(id) })) }),
@@ -3895,6 +3916,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           if (turn.settledInbox.has(inboxID)) return;
           turn.steers.add(inboxID);
           state.strandedSteers.delete(inboxID);
+          const files = promptImageFiles(
+            steerInput.message.attachments,
+            host.resolveAttachmentPath,
+          );
           yield* client.session
             .prompt({
               sessionID: Session.ID.make(sessionId),
@@ -3904,6 +3929,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
                 attachments: steerInput.message.attachments,
                 resolveAttachmentPath: host.resolveAttachmentPath,
               }).trim(),
+              ...(files.length === 0 ? {} : { files }),
               delivery: "steer",
             })
             .pipe(
