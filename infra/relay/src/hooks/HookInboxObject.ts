@@ -44,19 +44,32 @@ export class HookInboxObject extends Cloudflare.DurableObject<
 const deliver = (baseUrl: string, hook: HookInboxStore.HeldHook) =>
   sendUpstream(baseUrl, hook).pipe(
     Effect.result,
-    Effect.map((result): HookInboxStore.DeliveryOutcome => {
+    Effect.map((result) => {
       // Unreachable or timed out: a timeout may still have run it, and the
       // environment drops a delivery id it has already seen.
-      if (Result.isFailure(result) || Option.isNone(result.success)) return "unreachable";
+      if (Result.isFailure(result)) {
+        return { outcome: "unreachable" as const, reason: result.failure._tag };
+      }
+      if (Option.isNone(result.success))
+        return { outcome: "unreachable" as const, reason: "timeout" };
       const status = result.success.value.status;
-      if (UNREACHABLE_STATUSES.has(status)) return "unreachable";
-      return BUSY_STATUSES.has(status) ? "busy" : "delivered";
+      const outcome: HookInboxStore.DeliveryOutcome = UNREACHABLE_STATUSES.has(status)
+        ? "unreachable"
+        : BUSY_STATUSES.has(status)
+          ? "busy"
+          : "delivered";
+      return { outcome, reason: `status ${status}` };
     }),
-    Effect.tap((outcome) =>
+    Effect.tap(({ outcome, reason }) =>
       outcome === "delivered"
         ? Effect.void
-        : Effect.logInfo("Held webhook not delivered yet", { outcome, deliveryId: hook.id }),
+        : Effect.logInfo("Held webhook not delivered yet", {
+            outcome,
+            reason,
+            deliveryId: hook.id,
+          }),
     ),
+    Effect.map(({ outcome }) => outcome),
     Effect.provide(FetchHttpClient.layer),
   );
 

@@ -68,10 +68,9 @@ describe("HookInboxStore", () => {
         const offline = deliverer(() => "unreachable");
         const now = yield* Clock.currentTimeMillis;
         // Stops at the first failure, so order is kept.
-        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 30_000);
+        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 10_000);
         expect(offline.sent.map((entry) => entry.hook.id)).toEqual(["first"]);
-        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 60_000);
-        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 120_000);
+        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 10_000);
 
         const online = deliverer(() => "delivered");
         expect(yield* HookInboxStore.deliverDue(online.send)).toBeNull();
@@ -116,10 +115,15 @@ describe("HookInboxStore", () => {
     ),
   );
 
-  it("caps the wait between attempts at 10 minutes", () => {
-    expect(HookInboxStore.retryDelayMs(1)).toBe(30_000);
-    expect(HookInboxStore.retryDelayMs(20)).toBe(10 * 60_000);
-  });
+  it.effect("retries every 10 s for 3 minutes, then backs off to 10 minutes", () =>
+    Effect.gen(function* () {
+      const delays = yield* Effect.forEach(
+        [1, 18, 19, 20, 21, 23, 24, 40],
+        HookInboxStore.retryDelayMs,
+      );
+      expect(delays).toEqual([10_000, 10_000, 30_000, 60_000, 120_000, 480_000, 600_000, 600_000]);
+    }),
+  );
 
   it.effect("waking resets the backoff and reports whether anything waits", () =>
     withInbox(
@@ -130,10 +134,18 @@ describe("HookInboxStore", () => {
         yield* HookInboxStore.deliverDue(offline.send);
         yield* HookInboxStore.deliverDue(offline.send);
 
-        expect(yield* HookInboxStore.wake(BASE_URL)).toBe(true);
+        // Past the fast phase: the environment was away a while.
+        for (let failure = 0; failure < 20; failure++) {
+          yield* HookInboxStore.deliverDue(offline.send);
+        }
         const now = yield* Clock.currentTimeMillis;
-        // Back to the first step, and sent to where the environment is now.
-        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 30_000);
+        expect(yield* HookInboxStore.deliverDue(offline.send)).toBeGreaterThan(now + 60_000);
+
+        // A wake means its tunnel just connected, which Cloudflare may not
+        // route to for a few minutes: back to retrying every 10 s, sent to
+        // where the environment is now.
+        expect(yield* HookInboxStore.wake(BASE_URL)).toBe(true);
+        expect(yield* HookInboxStore.deliverDue(offline.send)).toBe(now + 10_000);
         expect(offline.sent.at(-1)?.baseUrl).toBe(BASE_URL);
       }),
     ),

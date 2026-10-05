@@ -1,7 +1,10 @@
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Pull from "effect/Pull";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -26,8 +29,28 @@ export const HOOK_INBOX_MAX_PER_HOOK = 100;
 const DELIVERIES_PER_RUN = 20;
 /** Requests read per run, so requests behind a busy hook's backlog are still reached. */
 const ROWS_READ_PER_RUN = 200;
-const FIRST_RETRY_MS = 30_000;
-const MAX_RETRY_MS = 10 * 60_000;
+/** Wait before trying a hook whose environment answered busy again. */
+const BUSY_RETRY_MS = 30_000;
+const MAX_RETRY_DELAY = Duration.minutes(10);
+
+/**
+ * Delays between delivery attempts while the environment is unreachable,
+ * indexed by consecutive failures since it was last reached or woke us.
+ * A wake means its tunnel just connected, but Cloudflare can take a few
+ * minutes to route the hostname to it, so the first 3 minutes retry every
+ * 10 s. After that the environment is likely gone again: 30 s, 1 min, 2 min,
+ * ... up to 10 min.
+ */
+export const retrySchedule = Schedule.spaced("10 seconds").pipe(
+  Schedule.upTo({ times: 18 }),
+  Schedule.concat(
+    Schedule.exponential("30 seconds").pipe(
+      Schedule.modifyDelay(({ duration }) =>
+        Effect.succeed(Duration.min(Duration.fromInputUnsafe(duration), MAX_RETRY_DELAY)),
+      ),
+    ),
+  ),
+);
 
 export interface HeldHook {
   readonly id: string;
@@ -52,9 +75,21 @@ export interface HeldHook {
  */
 export type DeliveryOutcome = "delivered" | "busy" | "unreachable";
 
-/** 30 s, 1 min, 2 min, ... up to 10 min between attempts while the environment stays away. */
-export const retryDelayMs = (failures: number) =>
-  Math.min(FIRST_RETRY_MS * 2 ** Math.max(0, failures - 1), MAX_RETRY_MS);
+/** The `retrySchedule` delay after `failures` consecutive unreachable attempts. */
+export const retryDelayMs = Effect.fn("HookInboxStore.retryDelayMs")(function* (failures: number) {
+  const step = yield* Schedule.toStep(retrySchedule);
+  let delay = MAX_RETRY_DELAY;
+  for (let attempt = 0; attempt < Math.max(1, failures); attempt++) {
+    const next = yield* step(0, undefined).pipe(
+      Effect.map(([, duration]) => Option.some(duration)),
+      // The schedule never ends; stay at the cap if it ever does.
+      Pull.catchDone(() => Effect.succeedNone),
+    );
+    if (Option.isNone(next)) break;
+    delay = next.value;
+  }
+  return Duration.toMillis(delay);
+});
 
 const HeadersJson = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
 const encodeHeaders = Schema.encodeSync(HeadersJson);
@@ -161,7 +196,7 @@ export const hold = Effect.fn("HookInboxStore.hold")(function* (hook: HeldHook, 
   if (inserted.length === 0) return null;
   yield* setTarget(baseUrl, { resetFailures: false });
   const target = yield* readTarget;
-  return (yield* Clock.currentTimeMillis) + retryDelayMs(Math.max(1, target?.failures ?? 0));
+  return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(target?.failures ?? 0));
 });
 
 /**
@@ -231,7 +266,7 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
     if (outcome === "unreachable") {
       failures += 1;
       yield* setFailures(failures);
-      return (yield* Clock.currentTimeMillis) + retryDelayMs(failures);
+      return (yield* Clock.currentTimeMillis) + (yield* retryDelayMs(failures));
     }
     if (failures !== 0) {
       failures = 0;
@@ -247,5 +282,5 @@ export const deliverDue = Effect.fn("HookInboxStore.deliverDue")(function* <R>(
   if (!(yield* hasPending)) return null;
   // Everything left this run was busy: give those tasks a moment to drain.
   const now = yield* Clock.currentTimeMillis;
-  return delivered === 0 && busyHooks.size > 0 ? now + FIRST_RETRY_MS : now;
+  return delivered === 0 && busyHooks.size > 0 ? now + BUSY_RETRY_MS : now;
 });
