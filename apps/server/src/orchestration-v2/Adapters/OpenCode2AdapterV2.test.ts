@@ -319,7 +319,11 @@ const colorForm = {
  */
 const resumed = (
   entries: ReadonlyArray<ProviderReplayEntry>,
-  options?: { readonly external?: boolean; readonly supervised?: boolean },
+  options?: {
+    readonly external?: boolean;
+    readonly supervised?: boolean;
+    readonly attachmentsDir?: string;
+  },
 ) =>
   Effect.gen(function* () {
     const runtime = yield* openCode2ReplayRuntime(
@@ -338,7 +342,12 @@ const resumed = (
           : []),
         ...entries,
       ]),
-      options?.external === undefined ? undefined : { external: options.external },
+      {
+        ...(options?.external === undefined ? {} : { external: options.external }),
+        ...(options?.attachmentsDir === undefined
+          ? {}
+          : { attachmentsDir: options.attachmentsDir }),
+      },
     );
     const thread = yield* runtime.resumeThread({
       providerThread: providerThread(yield* DateTime.now),
@@ -2805,32 +2814,38 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
   it.effect("sends a turn's and a steer's pasted images as prompt files", () =>
     Effect.gen(function* () {
       const steerId = "msg_recorded_steer_image";
-      const { runtime, thread } = yield* resumed([
-        out("session.prompt", {
-          sessionID: SESSION,
-          text: "<any>",
-          files: [{ uri: "<any>", name: "screenshot.png" }],
-        }),
-        promptAccepted,
-        event("session.execution.started", { sessionID: SESSION }),
-        out("session.prompt", {
-          sessionID: SESSION,
-          id: steerId,
-          text: "<any>",
-          files: [{ uri: "<any>", name: "chart.png" }],
-          delivery: "steer",
-        }),
-        replyData("session.prompt", {
-          id: steerId,
-          sessionID: SESSION,
-          time: { created: 1790656601500 },
-          type: "user",
-          payload: { text: "And this one?" },
-          delivery: "steer",
-        }),
-        event("session.inbox.delivered", { sessionID: SESSION, inboxID: steerId }),
-        event("session.execution.succeeded", { sessionID: SESSION }),
-      ]);
+      const attachmentsDir = "/t3/attachments";
+      const screenshot = `${attachmentsDir}/thread-opencode2-adapter-12345678-1234-1234-1234-123456789abc.png`;
+      const chart = `${attachmentsDir}/thread-opencode2-adapter-abcdefab-1234-1234-1234-123456789abc.png`;
+      const { runtime, thread } = yield* resumed(
+        [
+          out("session.prompt", {
+            sessionID: SESSION,
+            text: `What's in this image?\n\n[Attached image "screenshot.png" is saved at: ${screenshot}]`,
+            files: [{ uri: `file://${screenshot}`, name: "screenshot.png" }],
+          }),
+          promptAccepted,
+          event("session.execution.started", { sessionID: SESSION }),
+          out("session.prompt", {
+            sessionID: SESSION,
+            id: steerId,
+            text: `And this one?\n\n[Attached image "chart.png" is saved at: ${chart}]`,
+            files: [{ uri: `file://${chart}`, name: "chart.png" }],
+            delivery: "steer",
+          }),
+          replyData("session.prompt", {
+            id: steerId,
+            sessionID: SESSION,
+            time: { created: 1790656601500 },
+            type: "user",
+            payload: { text: "And this one?" },
+            delivery: "steer",
+          }),
+          event("session.inbox.delivered", { sessionID: SESSION, inboxID: steerId }),
+          event("session.execution.succeeded", { sessionID: SESSION }),
+        ],
+        { attachmentsDir },
+      );
       const image = (name: string, id: string) =>
         ChatImageAttachment.make({
           type: "image",
