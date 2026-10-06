@@ -809,16 +809,22 @@ const skillsNamed = (text: string, known: ReadonlySet<string>) => [
 /**
  * A message's pasted images as prompt files, which OpenCode reads from T3's
  * attachment directory and gives the model as images. The prompt text still
- * names where each one is saved, as with 1.x.
+ * names where each one is saved, as with 1.x. A server T3 did not start may
+ * not see that directory, so it gets the path text only.
  */
 export const promptImageFiles = (
   attachments: ReadonlyArray<ChatAttachment>,
   resolveAttachmentPath: (attachment: ChatAttachment) => string | null,
+  external: boolean,
 ) =>
-  attachments.filter(isProviderNativeImageAttachment).flatMap((attachment) => {
-    const path = resolveAttachmentPath(attachment);
-    return path === null ? [] : [{ uri: NodeURL.pathToFileURL(path).href, name: attachment.name }];
-  });
+  external
+    ? []
+    : attachments.filter(isProviderNativeImageAttachment).flatMap((attachment) => {
+        const path = resolveAttachmentPath(attachment);
+        return path === null
+          ? []
+          : [{ uri: NodeURL.pathToFileURL(path).href, name: attachment.name }];
+      });
 
 /**
  * The turn's own tokens: steps add up, and the last step's input is the live
@@ -3573,7 +3579,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             ),
           )
         : [];
-      const files = promptImageFiles(turnInput.message.attachments, host.resolveAttachmentPath);
+      const files = promptImageFiles(
+        turnInput.message.attachments,
+        host.resolveAttachmentPath,
+        connection.external,
+      );
       if (!sending()) return;
       return yield* client.session
         .prompt({
@@ -3919,6 +3929,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const files = promptImageFiles(
             steerInput.message.attachments,
             host.resolveAttachmentPath,
+            connection.external,
           );
           yield* client.session
             .prompt({
