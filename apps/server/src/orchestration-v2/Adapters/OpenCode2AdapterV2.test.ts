@@ -533,6 +533,43 @@ describe("OpenCode2 adapter", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("keeps the retries on a step that answered after a retry and then failed", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        retryScheduled(2),
+        // The retried attempt starts answering, then its stream fails for good.
+        event("session.text.started", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_0eb7320a9001vve3OV5uNi2HRT",
+          ordinal: 0,
+        }),
+        event("session.execution.failed", {
+          sessionID: SESSION,
+          error: { type: "provider.internal", message: "stream ended early" },
+        }),
+      ]);
+      const collected = yield* errorRowsAndTerminal(runtime);
+      yield* runtime.startTurn(turnInput(thread));
+      const { rows, terminal } = yield* Fiber.join(collected);
+      assert.deepEqual(
+        rows.map((item) => [item.status, item.title, item.retry?.attempt]),
+        [
+          ["running", "Provider retry", 2],
+          ["completed", "Provider recovered", 2],
+        ],
+      );
+      assert.equal(terminal?.status, "failed");
+      assert.equal(terminal?.status === "failed" ? terminal.retry?.attempt : undefined, 2);
+      assert.equal(
+        terminal?.status === "failed" ? terminal.retryStartedAt?.toString() : undefined,
+        rows[0]?.startedAt?.toString(),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("ends a turn on the provider thread it started on", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([

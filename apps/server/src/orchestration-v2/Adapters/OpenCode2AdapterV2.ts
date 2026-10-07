@@ -282,6 +282,8 @@ interface ActiveTurn {
         readonly retry: OrchestrationV2ProviderRetry;
         readonly failure: OrchestrationV2ProviderFailure;
         readonly startedAt: DateTime.Utc;
+        /** Shown as recovered once the retried step produced output; kept until that step ends. */
+        readonly recovered: boolean;
       }
     | undefined;
 }
@@ -1243,7 +1245,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     ) {
       const retry = turn.retry;
       if (retry === undefined) return;
-      if (status !== "running") turn.retry = undefined;
+      if (status === "completed") turn.retry = { ...retry, recovered: true };
+      else if (status !== "running") turn.retry = undefined;
       yield* emit({
         type: "turn_item.updated",
         driver,
@@ -1750,10 +1753,11 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       // A turn's failure item takes the retry row's slot; a subagent's session gets no such item.
       const exhausted =
         terminal.status === "failed" && state.subagent === undefined ? turn.retry : undefined;
-      if (exhausted !== undefined) turn.retry = undefined;
-      else if (terminal.status === "failed")
-        yield* emitRetry(state, turn, "failed", terminal.failure);
-      else yield* emitRetry(state, turn, terminal.status);
+      if (exhausted === undefined && turn.retry !== undefined) {
+        if (terminal.status === "failed") yield* emitRetry(state, turn, "failed", terminal.failure);
+        else if (!turn.retry.recovered) yield* emitRetry(state, turn, terminal.status);
+      }
+      turn.retry = undefined;
       // A foreground subagent ends with the turn that waits on it. A background
       // one outlives a finished or interrupted turn (a user Stop has already
       // stopped it), and a failed turn stops it.
@@ -2243,9 +2247,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       turn: ActiveTurn,
       event: OpenCode2StreamEvent,
     ) {
-      // OpenCode retries only a step that produced nothing, so any output is the retry's.
+      // Output shows the retry worked; the step can still fail after it and be retried again.
       if (
         turn.retry !== undefined &&
+        !turn.retry.recovered &&
         (event.type.startsWith("session.text.") ||
           event.type.startsWith("session.reasoning.") ||
           event.type.startsWith("session.tool."))
@@ -2268,6 +2273,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               retryable: true,
             }),
             startedAt: turn.retry?.startedAt ?? now,
+            recovered: false,
           };
           return yield* emitRetry(state, turn, "running");
         }
@@ -2360,6 +2366,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           return yield* emitCompaction(state, turn, "failed");
         case "session.step.ended":
         case "session.step.failed": {
+          if (event.type === "session.step.ended" && turn.retry !== undefined) {
+            if (!turn.retry.recovered) yield* emitRetry(state, turn, "completed");
+            turn.retry = undefined;
+          }
           const tokens = event.data.tokens;
           if (tokens === undefined) return;
           turn.steps += 1;
