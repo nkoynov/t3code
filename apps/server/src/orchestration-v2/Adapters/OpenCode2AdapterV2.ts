@@ -42,6 +42,8 @@ import {
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderCapabilities,
+  type OrchestrationV2ProviderFailure,
+  type OrchestrationV2ProviderRetry,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
@@ -89,7 +91,7 @@ import { providerMessageTextWithAttachmentPaths } from "../AttachmentPrompt.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import { backgroundWorkNotification, type BackgroundWorkReport } from "../Notification.ts";
 import * as ProviderContinuationRequests from "../ProviderContinuationRequests.ts";
-import { makeProviderFailure } from "../ProviderFailure.ts";
+import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import {
   makeSubagentChildThread,
   makeSubagentConversationArtifacts,
@@ -274,6 +276,14 @@ interface ActiveTurn {
   readonly scope: string;
   /** Set once the turn calls `subagent`: its usage then leaves out the subagents'. */
   usedSubagents: boolean;
+  /** OpenCode's retry of a failed step, shown until the step produces output or the turn ends. */
+  retry:
+    | {
+        readonly retry: OrchestrationV2ProviderRetry;
+        readonly failure: OrchestrationV2ProviderFailure;
+        readonly startedAt: DateTime.Utc;
+      }
+    | undefined;
 }
 
 /** A `subagent` tool call. A background one outlives the turn that made it. */
@@ -1224,6 +1234,36 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       if (status !== "running") turn.compaction = undefined;
     });
 
+    /** The retry row, in the slot the turn's failure takes if the retries run out. */
+    const emitRetry = Effect.fnUntraced(function* (
+      state: ThreadState,
+      turn: ActiveTurn,
+      status: "running" | "completed" | "interrupted",
+    ) {
+      const retry = turn.retry;
+      if (retry === undefined) return;
+      if (status !== "running") turn.retry = undefined;
+      yield* emit({
+        type: "turn_item.updated",
+        driver,
+        turnItem: makeProviderRetryTurnItem({
+          idAllocator,
+          driver,
+          threadId: turn.input.threadId,
+          runId: turn.input.runId,
+          nodeId: turn.input.rootNodeId,
+          providerThreadId: state.providerThread.id,
+          providerTurnId: turn.providerTurn.id,
+          itemOrdinal: ordinalOf(turn, `terminal-failure:${turn.providerTurn.id}`),
+          failure: retry.failure,
+          retry: retry.retry,
+          status,
+          startedAt: retry.startedAt,
+          updatedAt: yield* DateTime.now,
+        }),
+      });
+    });
+
     const emitProviderTurn = (
       state: ThreadState,
       turn: ActiveTurn,
@@ -1264,6 +1304,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       awaitingStart: options.awaitingStart,
       scope: options.scope,
       usedSubagents: false,
+      retry: undefined,
     });
 
     /** A subagent call as its parent turn's item, node and subagent row. */
@@ -1705,6 +1746,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           terminal.status === "completed" ? "completed" : "interrupted",
         );
       }
+      // A failure takes the retry row's slot itself.
+      if (terminal.status === "failed") turn.retry = undefined;
+      else yield* emitRetry(state, turn, terminal.status);
       // A foreground subagent ends with the turn that waits on it. A background
       // one outlives a finished or interrupted turn (a user Stop has already
       // stopped it), and a failed turn stops it.
@@ -2191,7 +2235,34 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       turn: ActiveTurn,
       event: OpenCode2StreamEvent,
     ) {
+      // OpenCode retries only a step that produced nothing, so any output is the retry's.
+      if (
+        turn.retry !== undefined &&
+        (event.type.startsWith("session.text.") ||
+          event.type.startsWith("session.reasoning.") ||
+          event.type.startsWith("session.tool."))
+      ) {
+        yield* emitRetry(state, turn, "completed");
+      }
       switch (event.type) {
+        case "session.retry.scheduled": {
+          const now = yield* DateTime.now;
+          turn.retry = {
+            retry: {
+              attempt: event.data.attempt,
+              maxAttempts: null,
+              retryDelayMs: Math.max(0, event.data.at - DateTime.toEpochMillis(now)),
+            },
+            failure: makeProviderFailure({
+              message: event.data.error.message,
+              code: event.data.error.type,
+              class: "provider_error",
+              retryable: true,
+            }),
+            startedAt: turn.retry?.startedAt ?? now,
+          };
+          return yield* emitRetry(state, turn, "running");
+        }
         case "session.text.started":
         case "session.reasoning.started":
         case "session.text.delta":

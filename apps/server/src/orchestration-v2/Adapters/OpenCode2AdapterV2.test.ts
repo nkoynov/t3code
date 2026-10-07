@@ -428,6 +428,105 @@ describe("OpenCode2 adapter", () => {
     }).pipe(Effect.scoped),
   );
 
+  /** The turn's error rows and its terminal, from one read of the event stream. */
+  const errorRowsAndTerminal = (runtime: ProviderAdapterV2SessionRuntime) =>
+    runtime.events.pipe(
+      Stream.takeUntil((event) => event.type === "turn.terminal"),
+      Stream.runCollect,
+      Effect.map((collected) => {
+        const events = Array.from(collected);
+        return {
+          rows: events.flatMap((event) =>
+            event.type === "turn_item.updated" && event.turnItem.type === "error"
+              ? [event.turnItem]
+              : [],
+          ),
+          terminal: events.find(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "turn.terminal" }> =>
+              event.type === "turn.terminal",
+          ),
+        };
+      }),
+      Effect.forkScoped,
+    );
+  const retryScheduled = (attempt: number) =>
+    event("session.retry.scheduled", {
+      sessionID: SESSION,
+      assistantMessageID: "msg_0eb7320a9001vve3OV5uNi2HRT",
+      attempt,
+      at: 1_790_656_600_000 + attempt * 2_000,
+      error: { type: "provider.internal", message: "Cursor API error (code=resource_exhausted)" },
+    });
+
+  it.effect("shows OpenCode's retry of a failed step until the step answers", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        retryScheduled(2),
+        retryScheduled(3),
+        event("session.text.started", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_0eb7320a9001vve3OV5uNi2HRT",
+          ordinal: 0,
+        }),
+        event("session.text.ended", {
+          sessionID: SESSION,
+          assistantMessageID: "msg_0eb7320a9001vve3OV5uNi2HRT",
+          ordinal: 0,
+          text: "pong",
+        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const collected = yield* errorRowsAndTerminal(runtime);
+      yield* runtime.startTurn(turnInput(thread));
+      const { rows, terminal } = yield* Fiber.join(collected);
+      assert.equal(terminal?.status, "completed");
+      assert.deepEqual(
+        rows.map((item) => [item.status, item.title, item.retry?.attempt]),
+        [
+          ["running", "Provider retry", 2],
+          ["running", "Provider retry", 3],
+          ["completed", "Provider recovered", 3],
+        ],
+      );
+      assert.equal(new Set(rows.map((item) => item.id)).size, 1);
+      assert.equal(rows[0]?.failure.message, "Cursor API error (code=resource_exhausted)");
+      assert.equal(rows[0]?.failure.retryable, true);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("puts the failure in the retry row's slot when the retries run out", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        retryScheduled(2),
+        event("session.execution.failed", {
+          sessionID: SESSION,
+          error: {
+            type: "provider.internal",
+            message: "Cursor API error (code=resource_exhausted)",
+          },
+        }),
+      ]);
+      const collected = yield* errorRowsAndTerminal(runtime);
+      yield* runtime.startTurn(turnInput(thread));
+      const { rows, terminal: ended } = yield* Fiber.join(collected);
+      assert.equal(ended?.status, "failed");
+      assert.deepEqual(
+        rows.map((item) => [item.status, item.title]),
+        [["running", "Provider retry"]],
+      );
+      assert.equal(
+        ended?.status === "failed" ? ended.failureItemOrdinal : undefined,
+        rows[0]?.ordinal,
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("ends a turn on the provider thread it started on", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
