@@ -8795,17 +8795,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
         return;
       const now = yield* DateTime.now;
-      // Only a live provider session still runs the work a turn-scoped Stop kept.
-      const sessionId = projection.providerThreads.find(
+      // A turn-scoped Stop keeps the work only while its provider still runs some for this
+      // thread: a session that died, or an adapter that fell back to a full stop, runs none.
+      const stoppedProviderThread = projection.providerThreads.find(
         (candidate) => candidate.id === command.providerThreadId,
-      )?.providerSessionId;
-      const keepBackgroundWork =
-        command.keepBackgroundWork === true &&
-        sessionId !== null &&
-        sessionId !== undefined &&
-        Option.isSome(
-          yield* providerSessions.get(sessionId).pipe(Effect.orElseSucceed(() => Option.none())),
-        );
+      );
+      const keepBackgroundWork = yield* Effect.gen(function* () {
+        const sessionId = stoppedProviderThread?.providerSessionId;
+        if (command.keepBackgroundWork !== true || stoppedProviderThread === undefined)
+          return false;
+        if (sessionId === null || sessionId === undefined) return false;
+        const session = yield* providerSessions
+          .get(sessionId)
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isNone(session)) return false;
+        const probe = session.value.hasPendingBackgroundWorkForThread;
+        return probe === undefined ? true : yield* probe(stoppedProviderThread);
+      });
       if (stopped.providerTurn !== undefined && stoppedRun.status === "running") {
         const output = yield* projectionStore
           .getThreadRecords(command.threadId, ["messages"], {

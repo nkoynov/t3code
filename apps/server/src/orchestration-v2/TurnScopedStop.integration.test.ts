@@ -53,6 +53,8 @@ const stopWithBackgroundWork = (input: {
   readonly settled?: boolean;
   /** The provider session is gone by the time the interrupt runs. */
   readonly sessionLostBeforeInterrupt?: boolean;
+  /** After the interrupt the provider reports no background work left, as a fallback to a full stop does. */
+  readonly providerRunsNoBackgroundWork?: boolean;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -96,6 +98,9 @@ const stopWithBackgroundWork = (input: {
                 lastError: null,
               },
               events: Stream.fromQueue(events),
+              ...(input.providerRunsNoBackgroundWork === true
+                ? { hasPendingBackgroundWorkForThread: () => Effect.succeed(false) }
+                : {}),
               ensureThread: ({ threadId }) =>
                 Effect.succeed({
                   id: ProviderThreadId.make(`provider-thread:codex:${threadId}`),
@@ -414,6 +419,22 @@ it.effect("a turn-scoped Stop ends the background work of a provider session tha
     });
     assert.deepEqual(stopped.interrupt, []);
     assert.equal(stopped.devServer, "interrupted");
+  }),
+);
+
+it.effect("a turn-scoped Stop ends the background work its provider no longer runs", () =>
+  Effect.gen(function* () {
+    const stopped = yield* stopWithBackgroundWork({
+      scope: "turn",
+      providerKeepsBackgroundWork: true,
+      providerRunsNoBackgroundWork: true,
+    });
+    assert.deepEqual(stopped.interrupt, [
+      { keepBackgroundWork: true, requestRuntimeRestart: undefined },
+    ]);
+    assert.equal(stopped.devServer, "interrupted");
+    assert.isTrue(stopped.watched);
+    assert.isFalse(stopped.stopsDelegatedTasks);
   }),
 );
 
