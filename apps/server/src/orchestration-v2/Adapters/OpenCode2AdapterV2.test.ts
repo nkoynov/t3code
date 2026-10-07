@@ -1007,6 +1007,66 @@ describe("OpenCode2 adapter", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("ends a subagent's retry row as its failure when the retries run out", () =>
+    Effect.gen(function* () {
+      const call = "call-foreground";
+      const tool = { sessionID: SESSION, assistantMessageID: "msg_assistant", id: call };
+      const { runtime, thread } = yield* resumed([
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.started", { sessionID: SESSION }),
+        event("session.tool.input.started", { ...tool, name: "subagent" }),
+        event("session.tool.called", {
+          ...tool,
+          name: "subagent",
+          input: { description: "Sleep", prompt: "sleep" },
+          executed: false,
+        }),
+        event("session.created", childCreated(CHILD)),
+        event("session.tool.progress", {
+          ...tool,
+          metadata: { sessionID: CHILD, status: "running" },
+        }),
+        event("session.execution.started", { sessionID: CHILD }),
+        event("session.retry.scheduled", {
+          sessionID: CHILD,
+          assistantMessageID: "msg_0eb7320a9001vve3OV5uNi2HRT",
+          attempt: 2,
+          at: 1_790_656_604_000,
+          error: {
+            type: "provider.internal",
+            message: "Cursor API error (code=resource_exhausted)",
+          },
+        }),
+        event("session.execution.failed", {
+          sessionID: CHILD,
+          error: { type: "provider.internal", message: "out of retries" },
+        }),
+      ]);
+      const collected = yield* runtime.events.pipe(
+        Stream.takeUntil(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "failed",
+        ),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(withLineage(thread));
+      const rows = Array.from(yield* Fiber.join(collected)).flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "error"
+          ? [event.turnItem]
+          : [],
+      );
+      assert.deepEqual(
+        rows.map((item) => [item.status, item.title, item.failure.message]),
+        [
+          ["running", "Provider retry", "Cursor API error (code=resource_exhausted)"],
+          ["failed", "Provider error", "out of retries"],
+        ],
+      );
+      assert.equal(new Set(rows.map((item) => item.id)).size, 1);
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("stops a nested background subagent's report on its own parent's session", () =>
     Effect.gen(function* () {
       const MIDDLE = "ses_middle0000000000000000000";

@@ -1238,7 +1238,8 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     const emitRetry = Effect.fnUntraced(function* (
       state: ThreadState,
       turn: ActiveTurn,
-      status: "running" | "completed" | "interrupted",
+      status: "running" | "completed" | "interrupted" | "failed",
+      failure?: OrchestrationV2ProviderFailure,
     ) {
       const retry = turn.retry;
       if (retry === undefined) return;
@@ -1255,7 +1256,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           providerThreadId: state.providerThread.id,
           providerTurnId: turn.providerTurn.id,
           itemOrdinal: ordinalOf(turn, `terminal-failure:${turn.providerTurn.id}`),
-          failure: retry.failure,
+          failure: failure ?? retry.failure,
           retry: retry.retry,
           status,
           startedAt: retry.startedAt,
@@ -1746,8 +1747,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           terminal.status === "completed" ? "completed" : "interrupted",
         );
       }
-      // A failure takes the retry row's slot itself.
-      if (terminal.status === "failed") turn.retry = undefined;
+      // A turn's failure item takes the retry row's slot; a subagent's session gets no such item.
+      if (terminal.status === "failed" && state.subagent === undefined) turn.retry = undefined;
+      else if (terminal.status === "failed")
+        yield* emitRetry(state, turn, "failed", terminal.failure);
       else yield* emitRetry(state, turn, terminal.status);
       // A foreground subagent ends with the turn that waits on it. A background
       // one outlives a finished or interrupted turn (a user Stop has already
