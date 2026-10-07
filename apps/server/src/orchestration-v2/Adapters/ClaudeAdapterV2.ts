@@ -7916,6 +7916,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 providerTurnId: turnInput.providerTurnId,
               });
             } else {
+              // A full Stop overrides a turn-scoped one still waiting on Claude.
+              yield* Ref.update(turnsKeepingBackgroundWork, (current) => {
+                const next = new Set(current);
+                next.delete(turnInput.providerTurnId);
+                return next;
+              });
               yield* existing.query.interrupt;
             }
             yield* existing.query.close.pipe(Effect.ignore);

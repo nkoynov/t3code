@@ -32,6 +32,7 @@ import type {
   ProviderAdapterV2InterruptInput,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 
@@ -50,6 +51,8 @@ const stopWithBackgroundWork = (input: {
   readonly scope?: "turn";
   readonly providerKeepsBackgroundWork: boolean;
   readonly settled?: boolean;
+  /** The provider session is gone by the time the interrupt runs. */
+  readonly sessionLostBeforeInterrupt?: boolean;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -312,6 +315,13 @@ const stopWithBackgroundWork = (input: {
           holdQueue: true,
           ...(input.scope === undefined ? {} : { scope: input.scope }),
         });
+        if (input.sessionLostBeforeInterrupt === true) {
+          const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          yield* sessions.release({
+            providerSessionId: started.providerThreads[0]!.providerSessionId!,
+            reason: "runtime_error",
+          });
+        }
         yield* worker.drain();
 
         const after = yield* orchestrator.getThreadProjection(threadId);
@@ -392,6 +402,18 @@ it.effect("a Stop without a scope still ends everything, as older clients send i
       stopsDelegatedTasks: true,
       delegatedWake: "disposed",
     });
+  }),
+);
+
+it.effect("a turn-scoped Stop ends the background work of a provider session that died", () =>
+  Effect.gen(function* () {
+    const stopped = yield* stopWithBackgroundWork({
+      scope: "turn",
+      providerKeepsBackgroundWork: true,
+      sessionLostBeforeInterrupt: true,
+    });
+    assert.deepEqual(stopped.interrupt, []);
+    assert.equal(stopped.devServer, "interrupted");
   }),
 );
 

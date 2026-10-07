@@ -4354,6 +4354,61 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("a full Stop during a turn-scoped Stop ends the background work too", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let closes = 0;
+        const interruptSent = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid),
+          close: (sdkMessages) =>
+            Effect.sync(() => {
+              closes++;
+            }).pipe(Effect.andThen(Queue.shutdown(sdkMessages))),
+        });
+        const attemptId = RunAttemptId.make("attempt-claude-turn-scoped-then-full-stop");
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId,
+            text: "Run the build in the background, then the tests.",
+            attachments: [],
+          }),
+        );
+        yield* harness.offerAndWait(wakeTaskStarted);
+        const providerTurnId = yield* providerTurnIdOf(attemptId);
+        const turnScopedStop = yield* harness.runtime
+          .interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId,
+            keepBackgroundWork: true,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptSent);
+        // An older client or mobile stops everything while Claude has not answered yet.
+        yield* harness.runtime.interruptTurn({
+          providerThread: harness.providerThread,
+          providerTurnId,
+          requestRuntimeRestart: true,
+        });
+        yield* Fiber.join(turnScopedStop);
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+
+        assert.equal(closes, 1);
+        assert.isFalse(
+          terminal.status === "interrupted" && terminal.backgroundWorkContinues === true,
+        );
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("a settled Stop leaves a turn that replaced the closing process alone", () =>
     Effect.scoped(
       Effect.gen(function* () {

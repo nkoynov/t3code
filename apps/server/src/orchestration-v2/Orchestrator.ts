@@ -8795,6 +8795,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
         return;
       const now = yield* DateTime.now;
+      // Only a live provider session still runs the work a turn-scoped Stop kept.
+      const sessionId = projection.providerThreads.find(
+        (candidate) => candidate.id === command.providerThreadId,
+      )?.providerSessionId;
+      const keepBackgroundWork =
+        command.keepBackgroundWork === true &&
+        sessionId !== null &&
+        sessionId !== undefined &&
+        Option.isSome(
+          yield* providerSessions.get(sessionId).pipe(Effect.orElseSucceed(() => Option.none())),
+        );
       if (stopped.providerTurn !== undefined && stoppedRun.status === "running") {
         const output = yield* projectionStore
           .getThreadRecords(command.threadId, ["messages"], {
@@ -8808,11 +8819,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerTurn: stopped.providerTurn,
           events,
           effects,
-          ...(command.keepBackgroundWork === true ? { keepBackgroundWork: true } : {}),
+          ...(keepBackgroundWork ? { keepBackgroundWork: true } : {}),
           now,
         });
       }
-      if (command.keepBackgroundWork === true) return;
+      if (keepBackgroundWork) return;
       // A new turn may have started since Stop; its work is not this Stop's.
       if (
         projection.runs.some(
