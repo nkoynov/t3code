@@ -524,6 +524,12 @@ describe("OpenCode2 adapter", () => {
         ended?.status === "failed" ? ended.failureItemOrdinal : undefined,
         rows[0]?.ordinal,
       );
+      // The failure keeps the retries it ended, as Claude's does ("Provider error after N retries").
+      assert.equal(ended?.status === "failed" ? ended.retry?.attempt : undefined, 2);
+      assert.equal(
+        ended?.status === "failed" ? ended.retryStartedAt?.toString() : undefined,
+        rows[0]?.startedAt?.toString(),
+      );
     }).pipe(Effect.scoped),
   );
 

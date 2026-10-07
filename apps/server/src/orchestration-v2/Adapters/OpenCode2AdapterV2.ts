@@ -1748,7 +1748,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         );
       }
       // A turn's failure item takes the retry row's slot; a subagent's session gets no such item.
-      if (terminal.status === "failed" && state.subagent === undefined) turn.retry = undefined;
+      const exhausted =
+        terminal.status === "failed" && state.subagent === undefined ? turn.retry : undefined;
+      if (exhausted !== undefined) turn.retry = undefined;
       else if (terminal.status === "failed")
         yield* emitRetry(state, turn, "failed", terminal.failure);
       else yield* emitRetry(state, turn, terminal.status);
@@ -1848,6 +1850,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               status: "failed",
               failure: terminal.failure,
               failureItemOrdinal: ordinalOf(turn, `terminal-failure:${turn.providerTurn.id}`),
+              ...(exhausted === undefined
+                ? {}
+                : { retry: exhausted.retry, retryStartedAt: exhausted.startedAt }),
             }
           : { ...base, status: terminal.status, failure: null },
       );
