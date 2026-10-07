@@ -221,6 +221,8 @@ export const OrchestrationV2TurnCapabilities = Schema.Struct({
   supportsSteeringByInterruptRestart: Schema.Boolean,
   supportsQueuedMessages: Schema.Boolean,
   terminalStatusQuality: Schema.Literals(["strong", "weak", "none"]),
+  // Interrupting a turn can leave the background work it started running.
+  interruptKeepsBackgroundWork: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2TurnCapabilities = typeof OrchestrationV2TurnCapabilities.Type;
 
@@ -2934,6 +2936,14 @@ export const OrchestrationV2Command = Schema.Union([
      * watches, and stops every delegated task under the thread.
      */
     holdQueue: Schema.optional(Schema.Boolean),
+    /**
+     * What Stop ends. `turn` interrupts only a running turn: the background work it
+     * started, the thread's delegated tasks and pull request watches keep going, and
+     * provider background work survives where the provider's capabilities allow it
+     * (`interruptKeepsBackgroundWork`). Omitted, `all`, or a run that is no longer
+     * running ends everything.
+     */
+    scope: Schema.optional(Schema.Literals(["turn", "all"])),
   }),
   Schema.Struct({
     type: Schema.Literal("queued-message.promote-to-steer"),
@@ -3116,6 +3126,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
+    /** The Stop ended only the turn; its provider keeps running the background work. */
+    keepBackgroundWork: Schema.optional(Schema.Boolean),
   }),
   /**
    * Stop for one thread, whatever it is doing: interrupts its running turn, holds its queue,

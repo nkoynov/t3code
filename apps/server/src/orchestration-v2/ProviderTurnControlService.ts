@@ -49,6 +49,7 @@ export interface ProviderTurnControlServiceV2Shape {
     readonly providerSessionId: ProviderSessionId;
     readonly providerThreadId: ProviderThreadId;
     readonly providerTurnId: ProviderTurnId;
+    readonly keepBackgroundWork?: boolean;
   }) => Effect.Effect<void, ProviderTurnControlError>;
   readonly steer: (input: {
     readonly threadId: ThreadId;
@@ -174,7 +175,11 @@ export const layer: Layer.Layer<
     return ProviderTurnControlServiceV2.of({
       interrupt: (input) =>
         Effect.gen(function* () {
-          const loaded = yield* load({ ...input, operation: "interrupt" });
+          const { keepBackgroundWork, ...target } = input;
+          const loaded = yield* load({ ...target, operation: "interrupt" });
+          // A turn-scoped Stop leaves background work alone, so a turn that
+          // ended meanwhile has nothing left for it to stop.
+          if (keepBackgroundWork === true && loaded.providerTurn.status !== "running") return;
           const session = Option.isSome(loaded.session)
             ? loaded.session
             : yield* sessions.get(input.providerSessionId);
@@ -201,7 +206,9 @@ export const layer: Layer.Layer<
           yield* session.value.interruptTurn({
             providerThread: loaded.providerThread,
             providerTurnId: loaded.providerTurn.id,
-            requestRuntimeRestart: true,
+            ...(keepBackgroundWork === true
+              ? { keepBackgroundWork: true }
+              : { requestRuntimeRestart: true }),
           });
           // Give native terminal ingestion time to finish before the Stop
           // follow-up repairs a run whose provider no longer reports on it.

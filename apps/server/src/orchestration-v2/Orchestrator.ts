@@ -8398,6 +8398,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // A successful Stop may have no terminal event to ingest: the session or
   // native turn already died, or its final write failed when storage filled.
+  // A turn-scoped Stop (`keepBackgroundWork`) leaves the run's provider
+  // subagents to the provider still running them.
   const settleInterruptedRun = (input: {
     readonly command: Extract<
       OrchestrationV2ServerCommand,
@@ -8417,6 +8419,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly providerTurn: OrchestrationV2ProviderTurn;
     readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
     readonly effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>;
+    readonly keepBackgroundWork?: boolean;
     readonly now: DateTime.Utc;
   }) =>
     Effect.gen(function* () {
@@ -8481,9 +8484,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: { ...message, streaming: false, updatedAt: input.now },
         });
       }
-      const delegatedNodeIds = new Set(
+      const keptNodeIds = new Set(
         input.projection.subagents
-          .filter((subagent) => subagent.origin === "app_owned")
+          .filter(
+            (subagent) => subagent.origin === "app_owned" || input.keepBackgroundWork === true,
+          )
           .map((subagent) => subagent.id),
       );
       const cascaded = yield* RunExecutionService.cascadeTerminalizeRunOwnedSubagents({
@@ -8498,12 +8503,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         open: {
           subagents: new Map(
             input.projection.subagents
-              .filter((task) => task.runId === run.id && task.origin !== "app_owned")
+              .filter((task) => task.runId === run.id && !keptNodeIds.has(task.id))
               .map((task) => [task.id, task]),
           ),
           nodes: new Map(
             input.projection.nodes
-              .filter((node) => node.runId === run.id && !delegatedNodeIds.has(node.id))
+              .filter((node) => node.runId === run.id && !keptNodeIds.has(node.id))
               .map((node) => [node.id, node]),
           ),
           turnItems: new Map(),
@@ -8659,6 +8664,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * thread's pull request watches end, and every wake its delegated tasks still owe is
    * dropped, since Stop stops those tasks too. Nothing automatic starts the thread again.
    * `cohortRunIds` are dropped even when they owe nothing, like a plain interrupt's.
+   * A turn-scoped Stop (`keepBackgroundWork`) only holds the queue: watches and delegated
+   * tasks keep running and still wake the thread.
    */
   const holdStoppedThread = (input: {
     readonly command: Extract<
@@ -8668,6 +8675,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
     readonly projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "subagents">;
     readonly cohortRunIds: ReadonlyArray<RunId>;
+    readonly keepBackgroundWork?: boolean;
     readonly now: DateTime.Utc;
   }) =>
     Effect.gen(function* () {
@@ -8692,6 +8700,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: { ...run, queueHeld: true },
         });
       }
+      if (input.keepBackgroundWork === true) return;
       const pullRequests = thread.pullRequests ?? [];
       if (pullRequests.some((link) => link.watch !== undefined)) {
         yield* emitEvent({
@@ -8799,9 +8808,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerTurn: stopped.providerTurn,
           events,
           effects,
+          ...(command.keepBackgroundWork === true ? { keepBackgroundWork: true } : {}),
           now,
         });
       }
+      if (command.keepBackgroundWork === true) return;
       // A new turn may have started since Stop; its work is not this Stop's.
       if (
         projection.runs.some(
@@ -8905,10 +8916,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       return;
     });
 
+  /**
+   * `stopsDelegatedTasks`: the Stop button's interrupt also stops every delegated task
+   * under the thread once it commits, unless it ended only the turn.
+   */
   const dispatchRunInterrupt = (
     command: Extract<OrchestrationV2Command, { readonly type: "run.interrupt" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    options?: { readonly stopsDelegatedTasks?: boolean },
   ) =>
     Effect.gen(function* () {
       const projection = yield* loadProjectionForCommand(
@@ -8980,6 +8996,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (candidate) => candidate.id === run.userMessageId,
       );
       const completionCohortRunId = completionMessage?.delegatedCompletion?.parentRunId ?? run.id;
+      // A turn-scoped Stop of a settled run has no turn to end, so it ends everything.
+      const keepBackgroundWork =
+        command.scope === "turn" &&
+        (run.status === "preparing" || run.status === "starting" || run.status === "running");
       // Stop holds the rest of the thread too. A plain interrupt only drops the wakes owed by
       // this run's delegated tasks, or on a wake run, by the cohort that woke it.
       const stopRemainingWork = () =>
@@ -8989,18 +9009,35 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               events,
               projection,
               cohortRunIds: [completionCohortRunId],
+              keepBackgroundWork,
               now,
             })
-          : Effect.gen(function* () {
-              yield* disposeDelegatedCompletionCohort({
-                command,
-                events,
-                projection: yield* getProjectionWithPendingEvents(command.threadId, events),
-                parentRunId: completionCohortRunId,
-                disposition: "stopped",
-                now,
+          : keepBackgroundWork
+            ? Effect.void
+            : Effect.gen(function* () {
+                yield* disposeDelegatedCompletionCohort({
+                  command,
+                  events,
+                  projection: yield* getProjectionWithPendingEvents(command.threadId, events),
+                  parentRunId: completionCohortRunId,
+                  disposition: "stopped",
+                  now,
+                });
               });
-            });
+      const delegatedTasksStop: ReadonlyArray<PendingOrchestrationEffectV2> =
+        options?.stopsDelegatedTasks === true && !keepBackgroundWork
+          ? [
+              {
+                id: `effect:${command.commandId}:delegated-tasks.stop`,
+                commandId: command.commandId,
+                threadId: command.threadId,
+                request: {
+                  type: "delegated-tasks.stop",
+                  ...(command.reason === undefined ? {} : { reason: command.reason }),
+                },
+              },
+            ]
+          : [];
 
       const emitEvent = emit(events, command);
       const interruptRequestItem: OrchestrationV2TurnItem = {
@@ -9031,7 +9068,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // interrupt's settle follow-up ends what its provider leaves behind.
       // Work on a dead session is settled with this run's below.
       const otherProviderInterrupts: Array<PendingOrchestrationEffectV2> = [];
-      if (hasBackgroundWork || command.holdQueue === true) {
+      if (!keepBackgroundWork && (hasBackgroundWork || command.holdQueue === true)) {
         const runOrdinals = new Map(
           projection.runs.map((candidate) => [candidate.id, candidate.ordinal]),
         );
@@ -9194,7 +9231,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: { ...run, status: "interrupted", completedAt: now },
         });
         yield* stopRemainingWork();
-        yield* Ref.update(effects, (existing) => [...existing, ...otherProviderInterrupts]);
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          ...otherProviderInterrupts,
+          ...delegatedTasksStop,
+        ]);
         return {
           effectTypes: ["provider-turn.start", "provider-turn.restart"],
           reason: `Run ${run.id} was interrupted before its provider turn started.`,
@@ -9246,7 +9287,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           throughRunOrdinal: run.ordinal,
           now,
         });
-        yield* Ref.update(effects, (existing) => [...existing, ...otherProviderInterrupts]);
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          ...otherProviderInterrupts,
+          ...delegatedTasksStop,
+        ]);
         return undefined;
       }
       if (providerThread.providerSessionId === null) {
@@ -9277,6 +9322,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: interruptRequestItem,
       });
       yield* stopRemainingWork();
+      // A provider that cannot end a turn without its background work ends both, as before.
+      const providerKeepsBackgroundWork =
+        keepBackgroundWork &&
+        sessionOption.value.providerSession.capabilities.turns.interruptKeepsBackgroundWork ===
+          true;
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -9288,9 +9338,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             providerSessionId,
             providerThreadId: providerThread.id,
             providerTurnId: providerTurn.id,
+            ...(providerKeepsBackgroundWork ? { keepBackgroundWork: true } : {}),
           },
         } satisfies PendingOrchestrationEffectV2,
         ...otherProviderInterrupts,
+        ...delegatedTasksStop,
       ]);
       return undefined;
     });
@@ -10614,22 +10666,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchSubagentStop(command, events, effects);
         break;
       case "run.interrupt":
-        cancelUnsettledEffects = yield* dispatchRunInterrupt(command, events, effects);
-        // Stop also stops every delegated task under the thread once it commits.
-        if (command.holdQueue === true) {
-          yield* Ref.update(effects, (existing) => [
-            ...existing,
-            {
-              id: `effect:${command.commandId}:delegated-tasks.stop`,
-              commandId: command.commandId,
-              threadId: command.threadId,
-              request: {
-                type: "delegated-tasks.stop",
-                ...(command.reason === undefined ? {} : { reason: command.reason }),
-              },
-            } satisfies PendingOrchestrationEffectV2,
-          ]);
-        }
+        cancelUnsettledEffects = yield* dispatchRunInterrupt(command, events, effects, {
+          stopsDelegatedTasks: command.holdQueue === true,
+        });
         break;
       case "thread.stop":
         cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
