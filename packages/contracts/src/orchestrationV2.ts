@@ -3126,8 +3126,11 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
-    /** The Stop ended only the turn; its provider keeps running the background work. */
-    keepBackgroundWork: Schema.optional(Schema.Boolean),
+    /**
+     * The Stop ended only the turn: delegated tasks keep running, and so does provider
+     * work its provider still runs.
+     */
+    scope: Schema.optional(Schema.Literal("turn")),
   }),
   /**
    * Stop for one thread, whatever it is doing: interrupts its running turn, holds its queue,

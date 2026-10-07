@@ -8298,7 +8298,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * returned (`stoppedProviderThreadId`), and work on provider threads with no
    * live session at all. Only the stopped run's work and older runs' is ended
    * (`throughRunOrdinal`); a later run's work is its own. A dead process's
-   * roster goes too, as on restart.
+   * roster goes too, as on restart. A turn-scoped Stop leaves delegated tasks
+   * (`keepDelegatedTasks`): their child threads keep running and report on them.
    */
   const settleBackgroundWork = (input: {
     readonly command: Extract<
@@ -8312,6 +8313,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     >;
     readonly stoppedProviderThreadId: OrchestrationV2ProviderThread["id"] | null;
     readonly throughRunOrdinal: number;
+    readonly keepDelegatedTasks?: boolean;
     readonly now: DateTime.Utc;
   }) =>
     Effect.gen(function* () {
@@ -8343,6 +8345,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // An item without a run counts as the stopped run's.
         const itemRunOrdinal = item.runId === null ? undefined : runOrdinals.get(item.runId);
         if (itemRunOrdinal !== undefined && itemRunOrdinal > input.throughRunOrdinal) continue;
+        if (
+          input.keepDelegatedTasks === true &&
+          item.type === "subagent" &&
+          item.origin === "app_owned"
+        ) {
+          continue;
+        }
         const providerThreadId = item.providerThreadId ?? null;
         if (
           providerThreadId !== null &&
@@ -8795,20 +8804,22 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
         return;
       const now = yield* DateTime.now;
-      // A turn-scoped Stop keeps the work only while its provider still runs some for this
-      // thread: a session that died, or an adapter that fell back to a full stop, runs none.
+      // A turn-scoped Stop keeps provider work only while its provider can and still runs
+      // some for this thread: a session that died, or an adapter that fell back to a full
+      // stop, runs none.
       const stoppedProviderThread = projection.providerThreads.find(
         (candidate) => candidate.id === command.providerThreadId,
       );
       const keepBackgroundWork = yield* Effect.gen(function* () {
         const sessionId = stoppedProviderThread?.providerSessionId;
-        if (command.keepBackgroundWork !== true || stoppedProviderThread === undefined)
-          return false;
+        if (command.scope !== "turn" || stoppedProviderThread === undefined) return false;
         if (sessionId === null || sessionId === undefined) return false;
         const session = yield* providerSessions
           .get(sessionId)
           .pipe(Effect.orElseSucceed(() => Option.none()));
         if (Option.isNone(session)) return false;
+        if (session.value.providerSession.capabilities.turns.interruptKeepsBackgroundWork !== true)
+          return false;
         const probe = session.value.hasPendingBackgroundWorkForThread;
         return probe === undefined ? true : yield* probe(stoppedProviderThread);
       });
@@ -8846,6 +8857,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection,
         stoppedProviderThreadId: command.providerThreadId,
         throughRunOrdinal: stoppedRun.ordinal,
+        ...(command.scope === "turn" ? { keepDelegatedTasks: true } : {}),
         now,
       });
     });
@@ -9302,6 +9314,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           projection,
           stoppedProviderThreadId: providerThread.id,
           throughRunOrdinal: run.ordinal,
+          keepDelegatedTasks: keepBackgroundWork,
           now,
         });
         yield* Ref.update(effects, (existing) => [
@@ -9339,11 +9352,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: interruptRequestItem,
       });
       yield* stopRemainingWork();
-      // A provider that cannot end a turn without its background work ends both, as before.
-      const providerKeepsBackgroundWork =
-        keepBackgroundWork &&
-        sessionOption.value.providerSession.capabilities.turns.interruptKeepsBackgroundWork ===
-          true;
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -9355,7 +9363,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             providerSessionId,
             providerThreadId: providerThread.id,
             providerTurnId: providerTurn.id,
-            ...(providerKeepsBackgroundWork ? { keepBackgroundWork: true } : {}),
+            ...(keepBackgroundWork ? { scope: "turn" as const } : {}),
           },
         } satisfies PendingOrchestrationEffectV2,
         ...otherProviderInterrupts,

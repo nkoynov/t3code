@@ -347,6 +347,10 @@ const stopWithBackgroundWork = (input: {
             (row) => row.effect_type === "delegated-tasks.stop",
           ),
           delegatedWake: after.subagents[0]?.completionDelivery?.state ?? null,
+          // The Waiting strip lists a delegated task through this item.
+          delegatedItem: after.turnItems.find(
+            (item) => item.type === "subagent" && item.origin === "app_owned",
+          )?.status,
         };
       }).pipe(
         Effect.provide(
@@ -374,6 +378,7 @@ it.effect("a turn-scoped Stop ends only the turn when its provider keeps backgro
         watched: true,
         stopsDelegatedTasks: false,
         delegatedWake: null,
+        delegatedItem: "running",
       },
     );
   }),
@@ -392,6 +397,7 @@ it.effect(
           watched: true,
           stopsDelegatedTasks: false,
           delegatedWake: null,
+          delegatedItem: "running",
         },
       );
     }),
@@ -406,6 +412,7 @@ it.effect("a Stop without a scope still ends everything, as older clients send i
       watched: false,
       stopsDelegatedTasks: true,
       delegatedWake: "disposed",
+      delegatedItem: "interrupted",
     });
   }),
 );
@@ -435,6 +442,7 @@ it.effect("a turn-scoped Stop ends the background work its provider no longer ru
     assert.equal(stopped.devServer, "interrupted");
     assert.isTrue(stopped.watched);
     assert.isFalse(stopped.stopsDelegatedTasks);
+    assert.equal(stopped.delegatedItem, "running");
   }),
 );
 
@@ -453,6 +461,7 @@ it.effect("a turn-scoped Stop of a settled turn ends its background work", () =>
         watched: false,
         stopsDelegatedTasks: true,
         delegatedWake: "disposed",
+        delegatedItem: "interrupted",
       },
     );
   }),
