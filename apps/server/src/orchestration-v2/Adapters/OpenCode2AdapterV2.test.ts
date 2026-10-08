@@ -4,6 +4,7 @@
  * HTTP server. Frames reuse the shapes recorded against 2.0.18.
  */
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   ChatAttachmentId,
@@ -32,6 +33,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
@@ -49,6 +51,7 @@ import * as ProviderContinuationRequests from "@t3tools/provider-core/server/Pro
 import {
   OPENCODE_2_STILL_STOPPING,
   OPENCODE_PROVIDER,
+  presentPromptFiles,
   promptImageFiles,
   t3McpServerName,
 } from "@t3tools/provider-opencode/testing";
@@ -2814,9 +2817,15 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
   it.effect("sends a turn's and a steer's pasted images as prompt files", () =>
     Effect.gen(function* () {
       const steerId = "msg_recorded_steer_image";
-      const attachmentsDir = "/t3/attachments";
+      const fileSystem = yield* FileSystem.FileSystem;
+      const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-oc2-images-",
+      });
       const screenshot = `${attachmentsDir}/thread-opencode2-adapter-12345678-1234-1234-1234-123456789abc.png`;
       const chart = `${attachmentsDir}/thread-opencode2-adapter-abcdefab-1234-1234-1234-123456789abc.png`;
+      yield* Effect.forEach([screenshot, chart], (file) =>
+        fileSystem.writeFileString(file, "png!"),
+      );
       const { runtime, thread } = yield* resumed(
         [
           out("session.prompt", {
@@ -2881,7 +2890,20 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         },
       });
       assert.equal((yield* Fiber.join(terminal))?.status, "completed");
-    }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+    }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(IdAllocator.layer, NodeServices.layer))),
+  );
+
+  it.effect("drops a pasted image whose saved file is gone", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-oc2-images-",
+      });
+      const kept = { uri: `file://${attachmentsDir}/kept.png`, name: "kept.png" };
+      yield* fileSystem.writeFileString(`${attachmentsDir}/kept.png`, "png!");
+      const deleted = { uri: `file://${attachmentsDir}/deleted.png`, name: "deleted.png" };
+      assert.deepEqual(yield* presentPromptFiles(fileSystem, [kept, deleted]), [kept]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it("gives a server T3 started a file URL for each pasted image, an external one none", () => {
