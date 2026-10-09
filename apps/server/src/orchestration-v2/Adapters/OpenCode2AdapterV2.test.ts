@@ -945,6 +945,10 @@ describe("OpenCode2 adapter", () => {
     Effect.gen(function* () {
       const calls = new Map<string, { status: string; result: string | null }>();
       const childTurns = new Map<string, string>();
+      const callsAtChildTurnStart = new Map<
+        string,
+        Record<string, { status: string; result: string | null }>
+      >();
       const state: { roster: ReadonlyArray<unknown> | undefined } = { roster: undefined };
       let wake = yield* Deferred.make<void>();
       yield* runtime.events.pipe(
@@ -967,6 +971,9 @@ describe("OpenCode2 adapter", () => {
               event.type === "provider_turn.updated" &&
               id?.startsWith(`${CHILD}:turn:`) === true
             ) {
+              if (!childTurns.has(id)) {
+                callsAtChildTurnStart.set(id, Object.fromEntries(calls));
+              }
               childTurns.set(id, event.providerTurn.status);
             }
             yield* Deferred.succeed(wake, undefined);
@@ -985,7 +992,7 @@ describe("OpenCode2 adapter", () => {
             yield* until(check);
           });
         });
-      return { calls, childTurns, state, until };
+      return { calls, callsAtChildTurnStart, childTurns, state, until };
     });
   const launchedAndRunning = [
     ...backgroundLaunch(CHILD),
@@ -1058,7 +1065,7 @@ describe("OpenCode2 adapter", () => {
       yield* runtime.startTurn(withLineage(thread));
       // The new run's turn starts after the first report was handled.
       yield* watch.until(() => watch.childTurns.has(`${CHILD}:turn:2`));
-      assert.deepEqual(Object.fromEntries(watch.calls), {
+      assert.deepEqual(watch.callsAtChildTurnStart.get(`${CHILD}:turn:2`), {
         Sleep: { status: "completed", result: "FIRST_OK" },
         Again: { status: "running", result: null },
       });
