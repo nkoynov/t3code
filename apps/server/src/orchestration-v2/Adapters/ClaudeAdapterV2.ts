@@ -5451,6 +5451,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           }
           const completedAt = yield* DateTime.now;
           const interrupted = (yield* Ref.get(interruptedTurns)).has(context.providerTurnId);
+          // The process that would have finished a turn-scoped Stop's background work is gone.
+          yield* Ref.update(turnsKeepingBackgroundWork, (current) => {
+            const next = new Set(current);
+            next.delete(context.providerTurnId);
+            return next;
+          });
           yield* finalizeActiveTurn({
             context,
             status: interrupted ? "interrupted" : "failed",

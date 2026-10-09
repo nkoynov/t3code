@@ -4354,6 +4354,50 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("a turn-scoped Stop keeps no background work when the CLI process exits first", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const interruptSent = yield* Deferred.make<void>();
+        const harness = yield* makeWakeHarnessWithOptions({
+          interrupt: Deferred.succeed(interruptSent, undefined).pipe(Effect.asVoid),
+        });
+        const attemptId = RunAttemptId.make("attempt-claude-turn-scoped-stop-exit");
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId,
+            text: "Run the build in the background, then the tests.",
+            attachments: [],
+          }),
+        );
+        yield* harness.offerAndWait(wakeTaskStarted);
+        const stop = yield* harness.runtime
+          .interruptTurn({
+            providerThread: harness.providerThread,
+            providerTurnId: yield* providerTurnIdOf(attemptId),
+            keepBackgroundWork: true,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(interruptSent);
+        yield* Queue.shutdown(harness.sdkMessages);
+        yield* Fiber.join(stop);
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+
+        assert.equal(terminal.status, "interrupted");
+        assert.isFalse(
+          terminal.status === "interrupted" && terminal.backgroundWorkContinues === true,
+        );
+        assert.isFalse(yield* harness.hasPendingBackgroundWork);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
   it.effect("a full Stop during a turn-scoped Stop ends the background work too", () =>
     Effect.scoped(
       Effect.gen(function* () {
