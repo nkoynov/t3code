@@ -1023,7 +1023,7 @@ export const layer: Layer.Layer<
               if (
                 keepsBackgroundWork(terminal) &&
                 (input.isCurrentAttempt === undefined ||
-                  (yield* input.isCurrentAttempt().pipe(Effect.orElseSucceed(() => false))))
+                  (yield* input.isCurrentAttempt().pipe(Effect.orElseSucceed(() => true))))
               ) {
                 yield* Ref.set(ingestsKeptBackgroundWork, true);
               }
