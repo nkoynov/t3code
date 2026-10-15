@@ -156,6 +156,16 @@ export const layer: Layer.Layer<
               );
             }),
           ),
+        isCurrentAttempt: () =>
+          projectionStore
+            .getRuntimeRecoveryProjection(input.threadId)
+            .pipe(
+              Effect.map(
+                (current) =>
+                  current.runs.find((candidate) => candidate.id === input.runId)
+                    ?.activeAttemptId === input.attemptId,
+              ),
+            ),
         hasUnpairedRunInterruptRequest: () =>
           projectionStore
             .hasUnpairedRunInterruptRequest(
@@ -1225,6 +1235,7 @@ export const layer: Layer.Layer<
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
+        isCurrentAttempt: runControls.isCurrentAttempt,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,
         message: {
           messageId: message.id,

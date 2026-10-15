@@ -560,6 +560,13 @@ export interface ProviderAdapterV2SessionRuntime {
    * thread keeps showing Waiting.
    */
   readonly backgroundTasksEndWithProcess?: true;
+  /**
+   * Set when an interrupted turn leaves the thread's background work running,
+   * `hasPendingBackgroundWorkForThread` still reports it, and the adapter
+   * settles the turn's other subagents itself. The orchestrator then keeps
+   * that work listed after a Stop instead of ending it.
+   */
+  readonly interruptKeepsBackgroundWork?: true;
   readonly getModelContextWindow?: (
     modelSelection: ModelSelection,
     cwd?: string | null,

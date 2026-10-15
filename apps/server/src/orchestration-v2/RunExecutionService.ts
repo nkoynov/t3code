@@ -538,6 +538,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly relatedProviderThreadIds?: ReadonlyArray<ProviderThreadId>;
   readonly shouldStartProviderTurn?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
+  readonly isCurrentAttempt?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
   readonly modelSelection: ModelSelection;
@@ -932,8 +933,12 @@ export const layer: Layer.Layer<
             input.session.subscribeEvents === undefined
               ? { events: input.session.events, close: Effect.void }
               : yield* input.session.subscribeEvents;
+          // An interrupted run of such a provider keeps ingesting the work it kept,
+          // as a completed run does, so a later run inherits none.
           const inheritedBackgroundTurnItems = yield* (
-            input.loadInheritedBackgroundTurnItems?.() ?? Effect.succeed([])
+            input.session.interruptKeepsBackgroundWork === true
+              ? Effect.succeed([])
+              : (input.loadInheritedBackgroundTurnItems?.() ?? Effect.succeed([]))
           ).pipe(
             Effect.onError(() => eventSubscription.close),
             Effect.mapError(
@@ -970,6 +975,10 @@ export const layer: Layer.Layer<
             ReadonlySet<OrchestrationV2TurnItem["id"]>
           >(new Set(inheritedBackgroundTurnItemsById.keys()));
           const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
+          const keepsBackgroundWork = (terminal: ProviderTerminalEvent) =>
+            terminal.status === "interrupted" &&
+            input.session.interruptKeepsBackgroundWork === true;
+          const ingestsKeptBackgroundWork = yield* Ref.make(false);
           const finalizeRootRun = (terminal: ProviderTerminalEvent) =>
             Effect.gen(function* () {
               if (yield* Ref.get(rootRunFinalized)) {
@@ -999,7 +1008,9 @@ export const layer: Layer.Layer<
                   : {
                       hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
                     }),
-                openRunOwnedSubagents: openSubagents,
+                openRunOwnedSubagents: keepsBackgroundWork(terminal)
+                  ? emptyOpenRunOwnedSubagentProjection()
+                  : openSubagents,
                 terminal,
                 failureItemPersisted: terminal.status === "failed",
                 refreshAfterTurn,
@@ -1008,6 +1019,14 @@ export const layer: Layer.Layer<
                   (cause) => new RunExecutionIngestError({ runId: input.run.id, cause }),
                 ),
               );
+              // A Stop can end the run first; a restart or steer replaces the attempt.
+              if (
+                keepsBackgroundWork(terminal) &&
+                (input.isCurrentAttempt === undefined ||
+                  (yield* input.isCurrentAttempt().pipe(Effect.orElseSucceed(() => false))))
+              ) {
+                yield* Ref.set(ingestsKeptBackgroundWork, true);
+              }
               if (isRunOwnedSubagentTerminalStatus(terminal.status)) {
                 yield* Ref.set(openRunOwnedSubagents, emptyOpenRunOwnedSubagentProjection());
               }
@@ -1158,7 +1177,11 @@ export const layer: Layer.Layer<
               return false;
             }
             const terminal = yield* Ref.get(terminalEvent);
-            if (terminal !== null && terminal.status !== "completed") {
+            if (
+              terminal !== null &&
+              terminal.status !== "completed" &&
+              !(yield* Ref.get(ingestsKeptBackgroundWork))
+            ) {
               return true;
             }
             const childProviderTurns = yield* Ref.get(activeChildProviderTurns);

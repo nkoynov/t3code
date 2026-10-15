@@ -8318,6 +8318,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     >;
     readonly stoppedProviderThreadId: OrchestrationV2ProviderThread["id"] | null;
     readonly throughRunOrdinal: number;
+    readonly keptTaskIds?: ReadonlySet<string>;
     readonly now: DateTime.Utc;
   }) =>
     Effect.gen(function* () {
@@ -8355,6 +8356,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const itemRunOrdinal = item.runId === null ? undefined : runOrdinals.get(item.runId);
         if (itemRunOrdinal !== undefined && itemRunOrdinal > input.throughRunOrdinal) continue;
         const providerThreadId = item.providerThreadId ?? null;
+        if (
+          providerThreadId === input.stoppedProviderThreadId &&
+          input.keptTaskIds?.has(item.nativeItemRef?.nativeId ?? "") === true
+        ) {
+          continue;
+        }
         if (
           providerThreadId !== null &&
           providerThreadId !== input.stoppedProviderThreadId &&
@@ -8498,6 +8505,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly providerTurn: OrchestrationV2ProviderTurn;
     readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
     readonly effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>;
+    readonly keptTaskIds?: ReadonlySet<string>;
     readonly now: DateTime.Utc;
   }) =>
     Effect.gen(function* () {
@@ -8562,9 +8570,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           payload: { ...message, streaming: false, updatedAt: input.now },
         });
       }
-      const delegatedNodeIds = new Set(
+      const keptNodeIds = new Set(
         input.projection.subagents
-          .filter((subagent) => subagent.origin === "app_owned")
+          .filter(
+            (subagent) =>
+              subagent.origin === "app_owned" ||
+              input.keptTaskIds?.has(subagent.nativeTaskRef?.nativeId ?? "") === true,
+          )
           .map((subagent) => subagent.id),
       );
       const cascaded = yield* RunExecutionService.cascadeTerminalizeRunOwnedSubagents({
@@ -8579,12 +8591,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         open: {
           subagents: new Map(
             input.projection.subagents
-              .filter((task) => task.runId === run.id && task.origin !== "app_owned")
+              .filter((task) => task.runId === run.id && !keptNodeIds.has(task.id))
               .map((task) => [task.id, task]),
           ),
           nodes: new Map(
             input.projection.nodes
-              .filter((node) => node.runId === run.id && !delegatedNodeIds.has(node.id))
+              .filter((node) => node.runId === run.id && !keptNodeIds.has(node.id))
               .map((node) => [node.id, node]),
           ),
           turnItems: new Map(),
@@ -8837,6 +8849,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     });
 
+  const backgroundTasksKeptByProvider = (
+    providerThread: OrchestrationV2ProviderThread | undefined,
+  ): Effect.Effect<ReadonlySet<string>> =>
+    Effect.gen(function* () {
+      if (providerThread?.providerSessionId == null) return new Set<string>();
+      const session = yield* providerSessions
+        .get(providerThread.providerSessionId)
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      const runtime = Option.getOrUndefined(session);
+      if (
+        runtime?.interruptKeepsBackgroundWork !== true ||
+        runtime.hasPendingBackgroundWorkForThread === undefined ||
+        !(yield* runtime.hasPendingBackgroundWorkForThread(providerThread))
+      ) {
+        return new Set<string>();
+      }
+      return new Set((providerThread.pendingBackgroundTasks ?? []).map((task) => task.taskId));
+    });
+
   const dispatchBackgroundWorkSettle = (
     command: Extract<
       OrchestrationV2InternalCommand,
@@ -8943,6 +8974,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       )
         return;
       const now = yield* DateTime.now;
+      const keptTaskIds = yield* backgroundTasksKeptByProvider(
+        projection.providerThreads.find((candidate) => candidate.id === command.providerThreadId),
+      );
       if (stopped.providerTurn !== undefined && stoppedRun.status === "running") {
         const output = yield* projectionStore
           .getThreadRecords(command.threadId, ["messages"], {
@@ -8956,6 +8990,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerTurn: stopped.providerTurn,
           events,
           effects,
+          keptTaskIds,
           now,
         });
       }
@@ -8975,6 +9010,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection,
         stoppedProviderThreadId: command.providerThreadId,
         throughRunOrdinal: stoppedRun.ordinal,
+        keptTaskIds,
         now,
       });
     });

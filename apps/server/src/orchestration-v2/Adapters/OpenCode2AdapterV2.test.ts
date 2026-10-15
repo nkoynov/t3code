@@ -736,12 +736,10 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("stops background subagents on a user Stop", () =>
+  it.effect("keeps background subagents running on a user Stop of the running turn", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
         ...backgroundLaunch(CHILD),
-        out("session.interrupt", { sessionID: CHILD }),
-        reply("session.interrupt", { interrupted: true }),
         out("session.interrupt", { sessionID: SESSION }),
         reply("session.interrupt", { interrupted: true }),
         event("session.execution.interrupted", { sessionID: SESSION }),
@@ -755,6 +753,26 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         requestRuntimeRestart: true,
       });
       assert.equal((yield* watch.terminal)?.status, "interrupted");
+      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("stops background subagents on a user Stop after the turn ended", () =>
+    Effect.gen(function* () {
+      const { runtime, thread } = yield* resumed([
+        ...backgroundLaunch(CHILD),
+        event("session.execution.succeeded", { sessionID: SESSION }),
+        out("session.interrupt", { sessionID: CHILD }),
+        reply("session.interrupt", { interrupted: true }),
+      ]);
+      const watch = yield* watchBackgroundTurn(runtime);
+      yield* runtime.startTurn(withLineage(thread));
+      assert.equal((yield* watch.terminal)?.status, "completed");
+      yield* runtime.interruptTurn({
+        providerThread: thread,
+        providerTurnId: yield* providerTurnId,
+        requestRuntimeRestart: true,
+      });
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.scoped),
   );
@@ -763,24 +781,21 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([
         ...backgroundLaunch(CHILD),
+        event("session.execution.succeeded", { sessionID: SESSION }),
         out("session.interrupt", { sessionID: CHILD }),
         reply("session.interrupt", {
           status: 500,
           body: { _tag: "UnknownError", message: "interrupt failed" },
         }),
-        out("session.interrupt", { sessionID: SESSION }),
-        reply("session.interrupt", { interrupted: true }),
-        event("session.execution.interrupted", { sessionID: SESSION }),
       ]);
       const watch = yield* watchBackgroundTurn(runtime);
       yield* runtime.startTurn(withLineage(thread));
-      yield* watch.attached;
+      assert.equal((yield* watch.terminal)?.status, "completed");
       yield* runtime.interruptTurn({
         providerThread: thread,
         providerTurnId: yield* providerTurnId,
         requestRuntimeRestart: true,
       });
-      assert.equal((yield* watch.terminal)?.status, "interrupted");
       assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
       assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(thread));
     }).pipe(Effect.scoped),
@@ -802,25 +817,11 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           executed: false,
         }),
         event("session.created", childCreated(CHILD)),
-        event("session.text.ended", {
-          sessionID: SESSION,
-          assistantMessageID: "msg_assistant",
-          ordinal: 0,
-          text: "Launched.",
-        }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
         out("session.interrupt", { sessionID: CHILD }),
         reply("session.interrupt", { interrupted: true }),
-        out("session.interrupt", { sessionID: SESSION }),
-        reply("session.interrupt", { interrupted: true }),
-        event("session.execution.interrupted", { sessionID: SESSION }),
       ]);
-      const announced = yield* Deferred.make<void>();
       const terminal = yield* runtime.events.pipe(
-        Stream.tap((event) =>
-          event.type === "turn_item.updated" && event.turnItem.type === "assistant_message"
-            ? Deferred.succeed(announced, undefined)
-            : Effect.void,
-        ),
         Stream.filter(
           (
             event,
@@ -832,13 +833,12 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         Effect.forkScoped,
       );
       yield* runtime.startTurn(withLineage(thread));
-      yield* Deferred.await(announced);
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
       yield* runtime.interruptTurn({
         providerThread: thread,
         providerTurnId: yield* providerTurnId,
         requestRuntimeRestart: true,
       });
-      assert.equal((yield* Fiber.join(terminal))?.status, "interrupted");
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.scoped),
   );
@@ -1213,13 +1213,11 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           ordinal: 0,
           text: "Launched.",
         }),
+        event("session.execution.succeeded", { sessionID: SESSION }),
         out("session.interrupt", { sessionID: MIDDLE }),
         reply("session.interrupt", { interrupted: true }),
         out("session.interrupt", { sessionID: GRANDCHILD }),
         reply("session.interrupt", { interrupted: true }),
-        out("session.interrupt", { sessionID: SESSION }),
-        reply("session.interrupt", { interrupted: true }),
-        event("session.execution.interrupted", { sessionID: SESSION }),
         event("session.execution.interrupted", { sessionID: MIDDLE }),
         event("session.inbox.enqueued", report),
         event("session.execution.started", { sessionID: MIDDLE }),
@@ -1233,7 +1231,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           take: Effect.never,
         }),
       );
-      const launched = yield* Deferred.make<void>();
+      const ended = yield* Deferred.make<void>();
       const middleTurns: Array<string> = [];
       yield* runtime.events.pipe(
         Stream.tap((event) =>
@@ -1244,8 +1242,8 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
             ) {
               middleTurns.push(event.providerTurn.nativeTurnRef.nativeId);
             }
-            if (event.type === "turn_item.updated" && event.turnItem.type === "assistant_message") {
-              yield* Deferred.succeed(launched, undefined);
+            if (event.type === "turn.terminal") {
+              yield* Deferred.succeed(ended, undefined);
             }
           }),
         ),
@@ -1253,7 +1251,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
         Effect.forkScoped,
       );
       yield* runtime.startTurn(withLineage(thread));
-      yield* Deferred.await(launched);
+      yield* Deferred.await(ended);
       yield* runtime.interruptTurn({
         providerThread: thread,
         providerTurnId: yield* providerTurnId,

@@ -1104,6 +1104,193 @@ describe("OpenCode 2 through the orchestrator", () => {
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
   );
 
+  const childEnd = "child-end";
+  const stopWhileBackgroundRuns = Effect.fn("stopWhileBackgroundRuns")(function* (input: {
+    readonly name: string;
+    readonly whileStopped: ReadonlyArray<ProviderReplayEntry>;
+    readonly commands: (
+      thread: ReturnType<typeof threadCommands>,
+    ) => ReadonlyArray<OrchestrationV2Command>;
+    readonly steps: (
+      thread: ReturnType<typeof threadCommands>,
+      run: (ordinal: number) => OrchestrationV2Run["id"],
+    ) => ReadonlyArray<OrchestratorV2ScenarioStep>;
+  }) {
+    const name = input.name;
+    const cwd = yield* checkpointWorkspace(name);
+    const recorded = yield* readProviderReplayTranscript(
+      new URL(
+        "./testkit/fixtures/opencode2_background/opencode_transcript.ndjson",
+        import.meta.url,
+      ),
+    );
+    const indexOf = (label: string) =>
+      recorded.entries.findIndex((entry) => entry.type !== "runtime_exit" && entry.label === label);
+    const transcript = yield* OpenCode2OrchestratorReplayHarness.decodeTranscript({
+      ...recorded,
+      scenario: name,
+      entries: [
+        ...recorded.entries.slice(0, indexOf("session.text.ended")),
+        out("session.interrupt", { sessionID: BACKGROUND_PARENT }),
+        reply("session.interrupt", { interrupted: true }),
+        event("session.execution.interrupted", { sessionID: BACKGROUND_PARENT, reason: "user" }),
+        ...input.whileStopped,
+        ...recorded.entries
+          .map((entry, index) =>
+            index === indexOf("session.execution.succeeded.2") ? labelled(entry, childEnd) : entry,
+          )
+          .slice(indexOf("session.step.started.3")),
+      ],
+    });
+    const thread = threadCommands({ name, worktreePath: cwd });
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const run = (ordinal: number) => ids.derive.run({ threadId: thread.threadId, ordinal });
+    const start = thread.message("start", bigPickle, BACKGROUND_PROMPT);
+    const stop: OrchestrationV2Command = {
+      type: "run.interrupt",
+      commandId: thread.command("stop"),
+      threadId: thread.threadId,
+      runId: run(1),
+      holdQueue: true,
+    };
+    const result = yield* runOrchestratorV2ProviderReplayScenario(
+      {
+        name,
+        transcript,
+        commands: [thread.create, start, stop, ...input.commands(thread)],
+        steps: [
+          { type: "dispatch", command: thread.create },
+          { type: "advance_clock", duration: "1 millis" },
+          { type: "dispatch", command: start, await: false, key: "start" },
+          { type: "advance_clock", duration: "1 millis" },
+          {
+            type: "await_run_turn_item",
+            threadId: thread.threadId,
+            runId: run(1),
+            itemType: "subagent",
+          },
+          { type: "dispatch", command: stop },
+          {
+            type: "await_run_status",
+            threadId: thread.threadId,
+            runId: run(1),
+            status: "interrupted",
+          },
+          { type: "capture_shell_snapshot", key: "after-stop" },
+          ...input.steps(thread, run),
+          { type: "await", key: "start" },
+          { type: "await_thread_idle", threadId: thread.threadId },
+          { type: "await_no_background_work", threadId: thread.threadId },
+        ],
+      },
+      OpenCode2OrchestratorReplayHarness,
+      { runContinuationWorker: true },
+    ).pipe(provideDeterministicTestRuntime);
+    const projection = result.projections.get(thread.threadId);
+    assert.isDefined(projection);
+    const afterStop = result.capturedShellSnapshots
+      .get("after-stop")
+      ?.threads.find((row) => row.id === thread.threadId);
+    assert.deepEqual(
+      (afterStop?.pendingBackgroundTasks ?? []).map((task) => task.kind),
+      ["subagent"],
+    );
+    assert.lengthOf(projection!.subagents, 1);
+    assert.deepInclude(projection!.subagents[0], { status: "completed" });
+    assert.include(projection!.subagents[0]?.result ?? "", "CHILD_OK");
+    const subagentUpdates = result.storedEvents.flatMap(({ event }) =>
+      event.type === "subagent.updated" ||
+      (event.type === "turn-item.updated" && event.payload.type === "subagent")
+        ? [`${event.type}:${event.payload.status}`]
+        : [],
+    );
+    assert.isFalse(subagentUpdates.some((update) => update.endsWith(":interrupted")));
+    assert.sameMembers(
+      subagentUpdates.filter((update) => update.endsWith(":completed")),
+      ["turn-item.updated:completed", "subagent.updated:completed"],
+    );
+    return projection!;
+  });
+
+  it.effect("a Stop on a running turn leaves its background subagent running to report", () =>
+    Effect.gen(function* () {
+      const projection = yield* stopWhileBackgroundRuns({
+        name: "opencode2-stop-turn-keeps-background",
+        whileStopped: [],
+        commands: () => [],
+        steps: (thread, run) => [
+          { type: "release_replay_gate", label: childEnd },
+          {
+            type: "await_run_status",
+            threadId: thread.threadId,
+            runId: run(2),
+            status: "completed",
+          },
+        ],
+      });
+      assert.deepEqual(
+        projection.runs.map((candidate) => candidate.status),
+        ["interrupted", "completed"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
+  );
+
+  it.effect("keeps the background subagent a Stop left running through the next turn", () =>
+    Effect.gen(function* () {
+      const projection = yield* stopWhileBackgroundRuns({
+        name: "opencode2-stop-turn-then-next-turn",
+        whileStopped: [
+          // The next turn gives the running subagent the thread's rules first.
+          out("session.update", {
+            sessionID: BACKGROUND_CHILD,
+            permissions: t3Rules("opencode2-stop-turn-then-next-turn"),
+          }),
+          reply("session.update", null),
+          out("session.prompt", { sessionID: BACKGROUND_PARENT, id: "<any>", text: "<any>" }),
+          reply("session.prompt", {
+            data: {
+              id: "msg_next",
+              sessionID: BACKGROUND_PARENT,
+              time: { created: 9 },
+              type: "user",
+              payload: { text: "<prompt>" },
+              delivery: "steer",
+            },
+          }),
+          event("session.execution.started", { sessionID: BACKGROUND_PARENT }),
+          event("session.text.ended", {
+            sessionID: BACKGROUND_PARENT,
+            assistantMessageID: "msg_next_reply",
+            ordinal: 0,
+            text: "NEXT",
+          }),
+          event("session.execution.succeeded", { sessionID: BACKGROUND_PARENT }),
+        ],
+        commands: (thread) => [thread.message("next")],
+        steps: (thread, run) => [
+          { type: "dispatch", command: thread.message("next") },
+          {
+            type: "await_run_status",
+            threadId: thread.threadId,
+            runId: run(2),
+            status: "completed",
+          },
+          { type: "release_replay_gate", label: childEnd },
+          {
+            type: "await_run_status",
+            threadId: thread.threadId,
+            runId: run(3),
+            status: "completed",
+          },
+        ],
+      });
+      assert.deepEqual(
+        projection.runs.map((candidate) => candidate.status),
+        ["interrupted", "completed", "completed"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
+  );
+
   it.effect(
     "runs plan mode as OpenCode's plan agent and switches back before the next prompt",
     () =>

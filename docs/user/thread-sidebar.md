@@ -217,6 +217,8 @@ retry and the normal snooze choices.
 
 On web and desktop, use **Agents** to follow work delegated to subagents.
 Stop on a thread also stops the subagents it delegated to.
+With OpenCode 2, Stop during a turn ends only that turn: background subagents it started keep
+running and stay listed above the composer, where **Stop** ends them.
 
 Subagent threads started by the agent can't take messages; message the parent
 thread instead. When such a subagent needs an approval or an answer, the parent

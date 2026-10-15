@@ -469,6 +469,8 @@ export function layerWithRegistry<Error>(
         getThreadProjection: orchestrator.getThreadProjection,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
         delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
+        // Replayed threads delegate no tasks, so the Stop button has none to stop.
+        stopDelegatedTasks: () => Effect.void,
       });
     }),
   ).pipe(Layer.provide(layerOrchestratorProvided));

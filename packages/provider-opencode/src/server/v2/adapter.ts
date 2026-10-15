@@ -3284,6 +3284,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const state = nativeId == null ? undefined : threads.get(nativeId);
           return state !== undefined && hasBackground(state);
         }),
+      interruptKeepsBackgroundWork: true,
       getModelContextWindow: (selection, cwd) =>
         selection.instanceId === instanceId
           ? windowOf(cwd === undefined ? session.cwd : cwd, selection.model)
@@ -3620,14 +3621,17 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           const state = threads.get(sessionId);
           if (state === undefined) return;
           const turn = state.active;
+          const stopsRunningTurn =
+            turn !== undefined && turn.providerTurn.id === interruptInput.providerTurnId;
           // OpenCode stops a foreground subagent with its parent, but not a
-          // background one: a user Stop (`requestRuntimeRestart`) stops those
-          // too, and the execution OpenCode starts to report them. A turn
-          // interrupted to restart it with new input leaves them running.
-          if (interruptInput.requestRuntimeRestart === true) yield* stopBackground(state);
-          if (turn === undefined || turn.providerTurn.id !== interruptInput.providerTurnId) {
-            return;
+          // background one. A Stop on a running turn, like a restart with new
+          // input, leaves them running; a user Stop (`requestRuntimeRestart`)
+          // after the turn ended stops them, and the execution OpenCode starts
+          // to report them.
+          if (interruptInput.requestRuntimeRestart === true && !stopsRunningTurn) {
+            yield* stopBackground(state);
           }
+          if (!stopsRunningTurn) return;
           turn.interrupted = true;
           const reply = yield* client.session
             .interrupt({ sessionID: Session.ID.make(sessionId) })
