@@ -9,6 +9,9 @@ import type { PendingUserInput } from "../../lib/threadActivity";
 const harness = vi.hoisted(() => ({
   navigate: [] as Array<[string, object | undefined]>,
   openedUrls: [] as string[],
+  imageResolvers: [] as unknown[],
+  imageSourceInputs: [] as object[],
+  resolveImageSource: async () => ({ uri: "https://env.test/asset" }),
 }));
 
 type Children = { children?: ReactNode };
@@ -43,15 +46,39 @@ vi.mock("../files/FileMarkdownPreview", () => ({
   useMarkdownPreviewStyles: () => ({ nativeTextStyle: {} }),
 }));
 vi.mock("../../native/SelectableMarkdownText", () => ({
-  SelectableMarkdownText: (props: { markdown: string; onLinkPress?: (href: string) => void }) => (
-    <p>
-      {[...props.markdown.matchAll(/\[([^\]]+)\]\(([^)]+)\)/g)].map(([, label, href]) => (
-        <button key={href} type="button" onClick={() => props.onLinkPress?.(href!)}>
-          {label}
-        </button>
-      ))}
-    </p>
-  ),
+  SelectableMarkdownText: (props: {
+    markdown: string;
+    onLinkPress?: (href: string) => void;
+    onImagePress?: (href: string) => void;
+    resolveImageSource?: unknown;
+  }) => {
+    harness.imageResolvers.push(props.resolveImageSource);
+    return (
+      <p>
+        {[...props.markdown.matchAll(/(!?)\[([^\]]+)\]\(([^)]+)\)/g)].map(
+          ([, image, label, href]) => (
+            <button
+              key={href}
+              type="button"
+              onClick={() => (image ? props.onImagePress : props.onLinkPress)?.(href!)}
+            >
+              {label}
+            </button>
+          ),
+        )}
+      </p>
+    );
+  },
+}));
+vi.mock("../../native/useMarkdownImageSource", () => ({
+  useMarkdownImageSource: (input: object) => {
+    harness.imageSourceInputs.push(input);
+    return harness.resolveImageSource;
+  },
+}));
+vi.mock("../../components/ui/FilePreviewModal", () => ({
+  FilePreviewModal: (props: { source: { name: string } | null }) =>
+    props.source ? <dialog open>{props.source.name}</dialog> : null,
 }));
 vi.mock("../../state/entities", () => ({
   useLiveThreadLinkLabels: (markdown: string) => markdown,
@@ -74,6 +101,8 @@ function setup(questionMarkdown: string) {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   harness.navigate = [];
   harness.openedUrls = [];
+  harness.imageResolvers = [];
+  harness.imageSourceInputs = [];
 
   const pendingUserInput = {
     requestId: "request-1" as RuntimeRequestId,
@@ -121,6 +150,9 @@ function setup(questionMarkdown: string) {
       if (!link) throw new Error(`No link labelled ${label}`);
       await act(async () => link.click());
     },
+    preview() {
+      return container.querySelector("dialog")?.textContent ?? null;
+    },
     [Symbol.dispose]() {
       act(() => root.unmount());
     },
@@ -139,4 +171,20 @@ it("opens a workspace file link in a question in the thread's file viewer", asyn
       { environmentId: "env-1", threadId: "thread-1", path: ["docs", "probe.md"], line: "12" },
     ],
   ]);
+});
+
+it("loads a workspace image in a question through the thread and previews it on tap", async () => {
+  using screen = setup("Does this look right?\n\n![mockup](docs/mockup.png)");
+
+  expect(harness.imageSourceInputs).toContainEqual({
+    environmentId: "env-1",
+    threadId: "thread-1",
+    workspaceRoot: "/repo",
+  });
+  expect(harness.imageResolvers.at(-1)).toBe(harness.resolveImageSource);
+
+  await screen.pressLink("mockup");
+
+  expect(screen.preview()).toBe("mockup.png");
+  expect(harness.navigate).toEqual([]);
 });

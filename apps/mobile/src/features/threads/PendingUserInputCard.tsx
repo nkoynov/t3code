@@ -9,7 +9,7 @@ import {
 } from "@t3tools/shared/textDirection";
 import { useNavigation } from "@react-navigation/native";
 import { Plural, T, useGT, Var } from "gt-react-native";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Platform, Pressable, ScrollView, View, type LayoutChangeEvent } from "react-native";
 import Animated, {
   useAnimatedStyle,
@@ -21,9 +21,12 @@ import Animated, {
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { AppText as Text } from "../../components/ui/AppText";
 import { ControlPill } from "../../components/ui/ControlPill";
+import { FilePreviewModal, type FilePreviewSource } from "../../components/ui/FilePreviewModal";
 import { cn } from "../../lib/cn";
 import { resolveMarkdownLinkPresentation } from "../../lib/markdownLinks";
+import { resolveMarkdownMediaPreview } from "../../lib/markdownMedia";
 import { SelectableMarkdownText } from "../../native/SelectableMarkdownText";
+import { useMarkdownImageSource } from "../../native/useMarkdownImageSource";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { useMarkdownPreviewStyles } from "../files/FileMarkdownPreview";
 import {
@@ -106,18 +109,39 @@ function QuestionText(props: {
       ...(link.line ? { line: String(link.line) } : {}),
     });
   };
+  const resolveImageSource = useMarkdownImageSource({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    workspaceRoot: props.workspaceRoot,
+  });
+  const [previewImage, setPreviewImage] = useState<FilePreviewSource | null>(null);
+  const openImage = (href: string) => {
+    const media = resolveMarkdownMediaPreview(href, {
+      environmentId: props.environmentId,
+      threadId: props.threadId,
+      workspaceRoot: props.workspaceRoot,
+      imageEmbed: true,
+    });
+    if (media?.kind === "image") setPreviewImage(media.source);
+    else openLink(href);
+  };
   return (
-    <SelectableMarkdownText
-      markdown={markdown}
-      textStyle={styles.nativeTextStyle}
-      writingDirection={markdownProseDirection(markdown)}
-      // Android's renderer aligns relative to each paragraph's direction.
-      textAlign={
-        Platform.OS === "android" ? undefined : props.setDirection === "rtl" ? "right" : "left"
-      }
-      onLinkPress={openLink}
-      preserveSoftBreaks={props.preserveSoftBreaks}
-    />
+    <>
+      <SelectableMarkdownText
+        markdown={markdown}
+        textStyle={styles.nativeTextStyle}
+        writingDirection={markdownProseDirection(markdown)}
+        // Android's renderer aligns relative to each paragraph's direction.
+        textAlign={
+          Platform.OS === "android" ? undefined : props.setDirection === "rtl" ? "right" : "left"
+        }
+        onLinkPress={openLink}
+        resolveImageSource={resolveImageSource}
+        onImagePress={openImage}
+        preserveSoftBreaks={props.preserveSoftBreaks}
+      />
+      <FilePreviewModal source={previewImage} onRequestClose={() => setPreviewImage(null)} />
+    </>
   );
 }
 
